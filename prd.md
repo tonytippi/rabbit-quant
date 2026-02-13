@@ -1,23 +1,24 @@
 # PRODUCT REQUIREMENT DOCUMENT (PRD)
 **Project Name:** Quant-Rabbit Local Core
-**Version:** 2.1 (Live Paper Trading)
-**Date:** 2026-02-13
+**Version:** 2.0 (BMAD Compatible)
+**Date:** 2026-02-12
 **Target Hardware:** AMD Ryzen 7 7735HS (8C/16T), 64GB DDR5 RAM, NVMe SSD
 **Language:** Python 3.10+
 
 ---
 
 ## 1. Executive Summary
-**Quant-Rabbit Local Core** is a high-performance, privacy-focused Quantitative Trading Workstation designed to run entirely on consumer hardware. It replicates institutional-grade analytics—specifically **Market Cycles (Spectral Analysis)** and **Fractal Geometry (Hurst Exponent)**—to identify high-probability turning points.
-
-**Update v2.1:** The system now includes a **"Paper Trading" mode** to simulate live execution with a virtual \$1,000 balance, accounting for real-world exchange fees (Binance) without risking actual capital.
+**Quant-Rabbit Local Core** is a high-performance, privacy-focused Quantitative Trading Workstation designed to run entirely on consumer hardware. It replicates institutional-grade analytics—specifically **Market Cycles (Spectral Analysis)** and **Fractal Geometry (Hurst Exponent)**—to identify high-probability turning points in financial markets.
 
 ### 1.1 Problem Statement
-Retail traders struggle to validate strategies in real-time. Backtesting is useful, but it doesn't account for live market pressure or the cumulative impact of trading fees. Users need a safe "sandbox" to test their algorithms on live data before deploying real money.
+Retail traders rely on lagging indicators (RSI, MACD) and expensive SaaS platforms (TradingView, Bloomberg) that obscure the underlying math. They lack the ability to process raw market data non-linearly or perform heavy computational analysis without incurring significant cloud costs.
 
 ### 1.2 Target Personas
-* **The Algo-Researcher:** Needs to backtest complex hypotheses on years of data.
-* **The Forward Tester (NEW):** Needs to watch a bot trade \$1,000 of "fake money" in real-time to verify if the backtest results hold up against live spreads and fees.
+* **The Algo-Researcher:** Needs to backtest complex hypotheses on years of data without waiting hours for results.
+* **The Discretionary Quant:** Needs real-time, mathematically grounded signals to support manual execution, not black-box advice.
+
+### 1.3 Competitive Differentiator
+Unlike TradingView (visual only) or QuantConnect (cloud-dependent), Quant-Rabbit offers **Zero-Latency Local Compute**. It leverages the user's powerful local hardware (Ryzen 7, 64GB RAM) to run heavy math (FFT/Fractals) on 50+ assets simultaneously with no monthly fees and total data privacy.
 
 ---
 
@@ -26,92 +27,107 @@ The project is considered successful if it meets the following metrics:
 
 | Metric | Target |
 | :--- | :--- |
-| **Signal Accuracy** | Achieve a theoretical trade win rate of **>65%** over a 100-trade backtest sample. |
-| **Simulation Accuracy** | Paper trading PnL must match "real" theoretical PnL within **0.5%** error margin (accounting for fees). |
+| **Signal Accuracy** | Achieve a theoretical trade win rate of **>65%** over a 100-trade backtest sample on BTC/ETH. |
 | **Data Throughput** | Fetch, clean, and store OHLCV updates for **50+ assets** in under **60 seconds**. |
-| **Compute Speed** | Calculate Hurst Exponent for **10,000 candles** in under **0.05 seconds**. |
-| **Operational Cost** | **$0.00**. No cloud servers, no SaaS fees. |
+| **Compute Speed** | Calculate Hurst Exponent for **10,000 candles** in under **0.05 seconds** (via Numba). |
+| **System Latency** | Dashboard load time for a new ticker < **200ms**. |
+| **Operational Cost** | **$0.00**. No cloud servers, no SaaS subscriptions (using free tier APIs). |
 
 ---
 
 ## 3. Product Scope (Phasing)
 
 ### 3.1 MVP (Minimum Viable Product)
-* **Focus:** Data Pipeline, Math Core, & Paper Trading.
-* **Features:** Async data fetching, DuckDB storage, FFT/Hurst Engine, **Virtual Wallet ($1k)**, Fee Calculator.
-* **Output:** Console-based signal generation + "Virtual Trade" log file.
+* **Focus:** Data Pipeline & Math Core.
+* **Features:** Async data fetching, DuckDB storage, FFT Cycle Detector, Numba-optimized Hurst Calculator.
+* **Output:** Console-based signal generation.
 
 ### 3.2 Growth Phase
-* **Focus:** Visuals & Optimization.
-* **Features:** Streamlit Dashboard, VectorBT Backtesting, Heatmap optimization.
-* **Output:** Interactive charts with Cycle overlays and Real-time PnL graph.
+* **Focus:** Validation & Visuals.
+* **Features:** VectorBT backtesting engine, Heatmap optimization, Streamlit Dashboard v1.
+* **Output:** Interactive charts with Cycle overlays.
 
 ### 3.3 Vision (Future State)
-* **Focus:** Real Execution.
-* **Features:** Live API trading (Binance/Alpaca), RL Agent optimization.
+* **Focus:** Automation & Execution.
+* **Features:** Live Trading via API, RL Agent optimization, Telegram/Discord notifications.
+
+### 3.4 Out of Scope
+* Mobile App development.
+* SaaS/Cloud multi-tenant architecture.
+* Social trading features.
 
 ---
 
 ## 4. User Journeys
 
-### Persona 1: The Researcher (Backtesting)
-> **Goal:** Validate if "Cycle Bottoms" are profitable over the last 5 years.
-1.  **Ingest:** Runs `python data_loader.py --symbol BTC-USD --years 5`.
-2.  **Simulate:** Configures `backtest_config.json` (Hurst > 0.6).
-3.  **Analyze:** Reviews Heatmap to find the best timeframe (e.g., 4H).
+### Persona 1: The Researcher (Backtesting Strategy)
+> **Goal:** Validate if "Cycle Bottoms" are profitable when "Hurst > 0.6".
+1.  **Ingest:** User runs `python data_loader.py --symbol BTC-USD --years 5`.
+2.  **Verify:** System fetches 5 years of 1m/1h/4h data and stores it in DuckDB (< 30s).
+3.  **Simulate:** User configures `backtest_config.json` setting `hurst_threshold` to 0.6.
+4.  **Compute:** User runs `python vbt_runner.py`. System utilizes 16 CPU threads to test the strategy across 5 timeframes simultaneously.
+5.  **Analyze:** System outputs a Heatmap (HTML) showing the Sharpe Ratio for each timeframe.
 
-### Persona 2: The Forward Tester (Live Paper Trading) - NEW
-> **Goal:** Watch the bot trade a $1,000 virtual account on live Binance data.
-1.  **Configure:** User sets `PAPER_TRADE_MODE = True` and `INITIAL_BALANCE = 1000` in `config.py`.
-2.  **Launch:** Runs `python main.py --live`.
-3.  **Monitor:** The system fetches the latest 1-minute candle from Binance.
-4.  **Signal:** Math engine detects a Cycle Bottom + Hurst 0.75.
-5.  **Execute:** System records a "VIRTUAL BUY" at \$95,000.
-    * *Logic:* Deducts 0.1% fee (\$1.00). Balance is now \$0 USD, Holding 0.0105 BTC.
-6.  **Update:** Dashboard updates "Current Portfolio Value" in real-time as price moves.
-
----
-
-## 5. System Modules (Epics)
-
-### Epic 1: Data Ingestion ("The Lake")
-* **Story 1.1:** Async fetcher for `yfinance`/`ccxt`.
-* **Story 1.2:** DuckDB storage.
-* **Story 1.3:** Live Updater (1-minute intervals).
-
-### Epic 2: Quantitative Engine ("The Brain")
-* **Story 2.1:** FFT Cycle Detector (Low-pass filter).
-* **Story 2.2:** Numba-optimized Hurst Calculator.
-* **Story 2.3:** Phase Projection (Sine Wave overlay).
-
-### Epic 3: Paper Trading Engine ("The Simulator") - NEW
-**Objective:** Simulate a real exchange environment.
-* **Story 3.1 (Virtual Wallet):** Create a `Wallet` class that tracks `USD_Balance` and `Asset_Holdings`. It must initialize with \$1,000.
-* **Story 3.2 (Fee Logic):** Implement a fee deductor. Every trade (Buy/Sell) must subtract **0.1%** (Binance standard fee) from the transaction value.
-* **Story 3.3 (Order Manager):** Implement `buy()` and `sell()` functions that execute at the *Close* price of the latest candle.
-* **Story 3.4 (Trade Journal):** Log every transaction to `data/paper_trades.csv` (Time, Type, Price, Amount, Fee, Net Balance).
-
-### Epic 4: Dashboard ("The Cockpit")
-* **Story 4.1:** Streamlit Layout.
-* **Story 4.2:** Plotly Charts with Cycle Overlay.
-* **Story 4.3:** **Live PnL Widget:** A real-time counter showing "Account Value: \$1,025 (+2.5%)".
+### Persona 2: The Trader (Live Monitoring)
+> **Goal:** Find a trade setup for the next 4 hours.
+1.  **Launch:** User starts the dashboard `streamlit run app.py`.
+2.  **Scan:** Dashboard auto-refreshes every 60s. The "Opportunity Scanner" highlights `NVDA` and `ETH` as "Approaching Cycle Bottom".
+3.  **Inspect:** User clicks `NVDA`. The main chart loads instantly.
+    * **Visual:** Price is touching the bottom of the Sine Wave.
+    * **Metric:** Hurst Exponent is displayed as **0.72** (Strong Trend).
+4.  **Act:** User confirms the confluence and places a manual buy order on their broker.
 
 ---
 
-## 6. Functional Requirements (FR)
+## 5. Functional Requirements (FR)
 
-### Data & Math
-* **FR-01:** System must fetch OHLCV data for 50+ assets asynchronously.
-* **FR-02:** System must calculate Dominant Cycle & Hurst Exponent (<0.05s).
-* **FR-03:** System must project cycle phase 20 bars into the future.
+### Data Management
+* **FR-01:** System must support fetching OHLCV data for Stocks and Crypto from public market data APIs.
+* **FR-02:** System must handle at least 50 concurrent assets.
+* **FR-03:** System must support 6 distinct timeframes: 1m, 5m, 15m, 1h, 4h, 1d.
+* **FR-04:** Data ingestion for multiple assets must run concurrently to meet the 60-second throughput target.
+* **FR-05:** Database must enable "upsert" functionality to append new candles without duplicating history.
 
-### Paper Trading (Virtual Execution)
-* **FR-19:** System must initialize a virtual account with a configurable balance (Default: \$1,000).
-* **FR-20:** System must apply a **0.1% trading fee** to every buy and sell order.
-* **FR-21:** System must track "Unrealized PnL" (open positions) and "Realized PnL" (closed trades).
-* **FR-22:** System must prevent "over-trading" (cannot buy if USD balance < min_order_size).
-* **FR-23:** System must log all virtual trades to a CSV file for audit.
-* **FR-24:** System must support "Stop Loss" and "Take Profit" logic in paper mode (e.g., Sell if price drops 2%).
+### Quantitative Core
+* **FR-06:** System must calculate the Dominant Cycle Period using FFT (Fast Fourier Transform).
+* **FR-07:** System must apply a Low-Pass Filter to smooth out high-frequency noise before cycle detection.
+* **FR-08:** System must project the dominant cycle phase forward by at least 20 bars.
+* **FR-09:** System must calculate the Hurst Exponent using the R/S (Rescaled Range) method.
+* **FR-10:** Hurst calculation for 10,000 candles must complete in under 0.05 seconds.
+
+### Strategy & Backtesting
+* **FR-11:** System must allow users to define "Long" and "Short" logic based on Cycle Phase and Hurst Value.
+* **FR-12:** Backtesting engine must support parameter sweeping (e.g., testing Hurst threshold from 0.5 to 0.9).
+* **FR-13:** System must calculate performance metrics: Total Return, Sharpe Ratio, Max Drawdown, Win Rate.
+* **FR-14:** System must export trade logs to CSV for audit.
+
+### User Interface (Dashboard)
+* **FR-15:** Dashboard must display an interactive Candlestick chart with zoom, pan, and crosshair.
+* **FR-16:** Chart must support overlaying the "Predicted Sine Wave" on top of price action.
+* **FR-17:** Dashboard must include a "Scanner Table" sortable by Hurst Exponent.
+* **FR-18:** Dashboard must visually indicate "Buy/Sell" signals (e.g., Green/Red markers).
+
+---
+
+## 6. Non-Functional Requirements (NFR)
+
+### Performance
+* **NFR-01 (Latency):** Dashboard query response time must be **< 50ms** for cached data.
+* **NFR-02 (Throughput):** Backtesting 5 years of 1-minute data for 1 asset must complete in **< 5 seconds**.
+* **NFR-03 (Resource):** RAM usage must never exceed **40GB** (leaving 24GB for OS).
+
+### Reliability
+* **NFR-04 (Uptime):** Background scheduler must automatically restart on failure.
+* **NFR-05 (Error Handling):** All API failures must be logged to `system.log` without crashing the UI.
+
+### Security
+* **NFR-06 (Data Privacy):** No user data or trading strategies shall be transmitted to any external server.
+* **NFR-07 (Secrets):** API Keys must be stored in a local `.env` file and never hardcoded.
+
+### Maintainability
+* **NFR-08 (Code Style):** Code must adhere to PEP-8 standards.
+* **NFR-09 (Documentation):** All complex math functions (FFT, Hurst) must have Docstrings.
+* **NFR-10 (Testing):** Core mathematical modules must have >90% Unit Test coverage.
 
 ---
 
@@ -120,28 +136,28 @@ The project is considered successful if it meets the following metrics:
 ### 7.1 Tech Stack
 | Component | Technology | Justification |
 | :--- | :--- | :--- |
-| **Backend** | Python 3.10+ | Standard. |
-| **Database** | DuckDB | Fast local storage. |
-| **Math** | SciPy / Numba | Signal processing & optimization. |
-| **Simulation** | **Custom Python Class** | Simple state-machine for wallet/fees. |
-| **Frontend** | Streamlit | UI. |
+| **Backend** | Python 3.10+ | Industry standard for Quant. |
+| **Database** | **DuckDB** | OLAP database, extremely fast for time-series, runs in-process. |
+| **Math Core** | **SciPy / Numba** | Standard FFT signal processing & JIT optimization. |
+| **Backtesting** | **VectorBT** | Vectorized backtesting engine, faster than event-driven engines. |
+| **Frontend** | **Streamlit** | Rapid UI development, native Python support. |
 
 ### 7.2 Directory Structure
 ```text
 quant_rabbit/
-├── data/
-│   ├── market_data.duckdb
-│   └── paper_trades.csv    # NEW: Trade Log
+├── data/                   # DuckDB database file & Raw CSVs
 ├── src/
-│   ├── config.py           # Settings (INITIAL_BALANCE = 1000, FEE = 0.001)
-│   ├── data_loader.py
-│   ├── signals/
-│   │   ├── cycles.py
-│   │   └── fractals.py
-│   ├── paper/              # NEW MODULE
-│   │   ├── wallet.py       # Manages Balance & Holdings
-│   │   └── broker.py       # Executes virtual orders & Calcs Fees
-│   ├── dashboard/
-│   │   └── app.py
-├── main.py
+│   ├── config.py           # Settings (API Keys, Timeframes, Assets)
+│   ├── data_loader.py      # Module (Data Ingestion)
+│   ├── signals/            # Core Math
+│   │   ├── cycles.py       # FFT Algorithm
+│   │   ├── fractals.py     # Hurst Algorithm (Numba)
+│   │   └── filters.py      # Hybrid Logic
+│   ├── backtest/           # Research Engine
+│   │   ├── vbt_runner.py   # VectorBT setup
+│   │   └── analyzer.py     # Performance Metrics
+│   ├── dashboard/          # UI
+│   │   ├── app.py          # Main Streamlit App
+│   │   └── charts.py       # Plotly components
+├── main.py                 # Entry point
 └── requirements.txt

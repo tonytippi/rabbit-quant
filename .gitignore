@@ -59,9 +59,6 @@ htmlcov/
 .env
 .env.local
 
-# Output artifacts
-_bmad-output/
-
 # Logs
 *.log
 logs/
