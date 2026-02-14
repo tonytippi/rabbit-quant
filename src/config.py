@@ -86,8 +86,11 @@ class StrategyConfig:
 
         # Backtest settings
         self.backtest_hurst_range: list[float] = backtest.get("hurst_range", [0.5, 0.6, 0.7, 0.8, 0.9])
+        self.backtest_phase_long_range: list[float] = backtest.get("phase_long_range", [4.0, 4.4, 4.712, 5.0, 5.5])
+        self.backtest_phase_short_range: list[float] = backtest.get("phase_short_range", [1.0, 1.3, 1.571, 1.8, 2.1])
         self.backtest_initial_capital: float = backtest.get("initial_capital", 100000.0)
         self.backtest_commission: float = backtest.get("commission", 0.001)
+        self.backtest_output_dir: str = backtest.get("output_dir", "data/backtest")
 
 
 class TimeframeConfig:
