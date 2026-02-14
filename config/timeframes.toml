@@ -1,0 +1,22 @@
+# Timeframe configuration for Rabbit-Quant
+# Maps internal names to API-specific interval strings
+
+[timeframes]
+default = ["1m", "5m", "15m", "1h", "4h", "1d"]
+
+[yfinance_mapping]
+# yfinance does not support 4h natively — fetch 1h and resample in data_loader
+"1m" = "1m"
+"5m" = "5m"
+"15m" = "15m"
+"1h" = "1h"
+"4h" = "1h"
+"1d" = "1d"
+
+[ccxt_mapping]
+"1m" = "1m"
+"5m" = "5m"
+"15m" = "15m"
+"1h" = "1h"
+"4h" = "4h"
+"1d" = "1d"

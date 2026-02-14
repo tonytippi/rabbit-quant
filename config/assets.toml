@@ -1,0 +1,15 @@
+# Asset configuration for Rabbit-Quant
+# Define stock and crypto watchlists
+
+[stocks]
+symbols = [
+    "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN",
+    "META", "TSLA", "AMD", "INTC", "NFLX",
+]
+
+[crypto]
+symbols = [
+    "BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT",
+    "ADA/USDT", "DOGE/USDT", "DOT/USDT", "AVAX/USDT", "MATIC/USDT",
+]
+exchange = "binance"

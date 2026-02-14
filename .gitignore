@@ -68,3 +68,10 @@ logs/
 *.bak
 *.swp
 *~
+
+# DuckDB
+data/*.duckdb
+data/*.duckdb.wal
+
+# uv
+uv.lock

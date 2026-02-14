@@ -1,0 +1,132 @@
+"""Configuration module for Rabbit-Quant.
+
+Loads settings from .env (via Pydantic Settings) and TOML files (asset lists,
+strategy params, timeframe mappings). All other modules import config from here.
+"""
+
+import sys
+from pathlib import Path
+
+from loguru import logger
+from pydantic import Field
+from pydantic_settings import BaseSettings
+
+# Project root is the parent of src/
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+CONFIG_DIR = PROJECT_ROOT / "config"
+
+# TOML loading: stdlib tomllib on 3.11+, tomli on 3.10
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    try:
+        import tomli as tomllib  # type: ignore[no-redef]
+    except ImportError as e:
+        raise ImportError("Install tomli for Python < 3.11: uv add tomli") from e
+
+
+def _load_toml(filename: str) -> dict:
+    """Load a TOML file from the config directory."""
+    path = CONFIG_DIR / filename
+    if not path.exists():
+        logger.warning(f"Config file not found: {path}")
+        return {}
+    with open(path, "rb") as f:
+        return tomllib.load(f)
+
+
+class AppSettings(BaseSettings):
+    """Environment-based settings loaded from .env file."""
+
+    model_config = {"env_file": str(PROJECT_ROOT / ".env"), "env_file_encoding": "utf-8", "extra": "ignore"}
+
+    # Database
+    duckdb_path: str = Field(default="data/rabbit.duckdb", description="Path to DuckDB database file")
+
+    # Logging
+    log_level: str = Field(default="INFO", description="Logging level")
+    log_path: str = Field(default="logs/rabbit.log", description="Log file path")
+
+    # Data source
+    yfinance_proxy: str = Field(default="", description="Proxy for yfinance requests")
+
+
+class AssetConfig:
+    """Asset lists loaded from config/assets.toml."""
+
+    def __init__(self) -> None:
+        data = _load_toml("assets.toml")
+        self.stock_symbols: list[str] = data.get("stocks", {}).get("symbols", [])
+        self.crypto_symbols: list[str] = data.get("crypto", {}).get("symbols", [])
+        self.crypto_exchange: str = data.get("crypto", {}).get("exchange", "binance")
+
+    @property
+    def all_symbols(self) -> list[str]:
+        return self.stock_symbols + self.crypto_symbols
+
+
+class StrategyConfig:
+    """Strategy parameters loaded from config/strategy.toml."""
+
+    def __init__(self) -> None:
+        data = _load_toml("strategy.toml")
+        hurst = data.get("hurst", {})
+        cycle = data.get("cycle", {})
+        backtest = data.get("backtest", {})
+
+        # Hurst settings
+        self.hurst_threshold: float = hurst.get("threshold", 0.6)
+        self.hurst_min_data_points: int = hurst.get("min_data_points", 256)
+
+        # Cycle settings
+        self.cycle_min_period: int = cycle.get("min_period", 10)
+        self.cycle_max_period: int = cycle.get("max_period", 200)
+        self.cycle_projection_bars: int = cycle.get("projection_bars", 20)
+        self.cycle_lowpass_cutoff: float = cycle.get("lowpass_cutoff", 0.1)
+
+        # Backtest settings
+        self.backtest_hurst_range: list[float] = backtest.get("hurst_range", [0.5, 0.6, 0.7, 0.8, 0.9])
+        self.backtest_initial_capital: float = backtest.get("initial_capital", 100000.0)
+        self.backtest_commission: float = backtest.get("commission", 0.001)
+
+
+class TimeframeConfig:
+    """Timeframe mappings loaded from config/timeframes.toml."""
+
+    def __init__(self) -> None:
+        data = _load_toml("timeframes.toml")
+        self.default_timeframes: list[str] = data.get("timeframes", {}).get("default", ["1m", "5m", "15m", "1h", "4h", "1d"])
+        self.yfinance_mapping: dict[str, str] = data.get("yfinance_mapping", {})
+        self.ccxt_mapping: dict[str, str] = data.get("ccxt_mapping", {})
+
+
+def setup_logging(settings: AppSettings) -> None:
+    """Configure loguru logging with file rotation."""
+    log_path = PROJECT_ROOT / settings.log_path
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    logger.remove()  # Remove default handler
+    logger.add(
+        sys.stderr,
+        level=settings.log_level,
+        format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level:<8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan> - <level>{message}</level>",
+    )
+    logger.add(
+        str(log_path),
+        level=settings.log_level,
+        rotation="10 MB",
+        retention="7 days",
+        compression="gz",
+        format="{time:YYYY-MM-DD HH:mm:ss} | {level:<8} | {name}:{function} - {message}",
+    )
+
+
+def load_config() -> tuple[AppSettings, AssetConfig, StrategyConfig, TimeframeConfig]:
+    """Load all configuration. Call once at startup."""
+    settings = AppSettings()
+    setup_logging(settings)
+    assets = AssetConfig()
+    strategy = StrategyConfig()
+    timeframes = TimeframeConfig()
+    logger.info("Configuration loaded successfully")
+    return settings, assets, strategy, timeframes

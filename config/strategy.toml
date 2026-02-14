@@ -1,0 +1,17 @@
+# Strategy configuration for Rabbit-Quant
+# Hurst and cycle parameters for signal generation and backtesting
+
+[hurst]
+threshold = 0.6
+min_data_points = 256
+
+[cycle]
+min_period = 10
+max_period = 200
+projection_bars = 20
+lowpass_cutoff = 0.1
+
+[backtest]
+hurst_range = [0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9]
+initial_capital = 100000.0
+commission = 0.001
