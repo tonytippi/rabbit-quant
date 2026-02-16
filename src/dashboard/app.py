@@ -4,7 +4,8 @@ Story 4.1 — Dashboard layout with scanner table sorted by Hurst.
 Story 4.4 — Auto-refresh with APScheduler background data refresh.
 
 Architecture boundary: reads DuckDB + signals output as DataFrames,
-NEVER writes data. Uses in-memory cache with TTL.
+NEVER writes data. APScheduler refreshes a shared cache dict in
+the background; Streamlit reads from it on each rerun.
 
 Launch: uv run streamlit run src/dashboard/app.py
 """
@@ -14,10 +15,43 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+from apscheduler.schedulers.background import BackgroundScheduler
 from loguru import logger
 
 # Lazy imports to avoid circular deps and speed up initial load
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+
+# ---------------------------------------------------------------------------
+# Background data cache — written by APScheduler, read by Streamlit
+# ---------------------------------------------------------------------------
+_bg_cache: dict[str, pd.DataFrame] = {}
+
+
+def _refresh_scanner_data() -> None:
+    """Background job: recompute scanner data and store in _bg_cache."""
+    try:
+        settings, *_ = _get_config()
+        db_path = str(_PROJECT_ROOT / settings.duckdb_path)
+        if not Path(db_path).exists():
+            return
+        # Bypass Streamlit cache — direct computation
+        df = _compute_scanner_data(db_path)
+        _bg_cache["scanner"] = df
+        logger.debug(f"Background refresh complete: {len(df)} rows")
+    except Exception as e:
+        logger.error(f"Background refresh failed: {e}")
+
+
+def _start_scheduler() -> None:
+    """Start APScheduler once per Streamlit server process."""
+    if "scheduler_started" not in st.session_state:
+        scheduler = BackgroundScheduler(daemon=True)
+        scheduler.add_job(_refresh_scanner_data, "interval", seconds=60, id="scanner_refresh")
+        scheduler.start()
+        # Trigger first refresh immediately
+        _refresh_scanner_data()
+        st.session_state["scheduler_started"] = True
+        logger.info("APScheduler started — refreshing scanner data every 60s")
 
 
 def _get_config():
@@ -26,12 +60,8 @@ def _get_config():
     return load_config()
 
 
-@st.cache_data(ttl=60)
-def _load_scanner_data(db_path: str) -> pd.DataFrame:
-    """Load scanner data: compute signals for all symbols in DB.
-
-    Cached with 60s TTL for auto-refresh behavior.
-    """
+def _compute_scanner_data(db_path: str) -> pd.DataFrame:
+    """Compute scanner data from DB (no Streamlit cache — used by scheduler)."""
     import duckdb
 
     from src.signals.cycles import detect_dominant_cycle_filtered
@@ -40,7 +70,6 @@ def _load_scanner_data(db_path: str) -> pd.DataFrame:
     conn = duckdb.connect(db_path, read_only=True)
 
     try:
-        # Get unique symbol/timeframe pairs
         pairs = conn.execute(
             "SELECT DISTINCT symbol, timeframe FROM ohlcv ORDER BY symbol, timeframe"
         ).fetchdf()
@@ -93,6 +122,14 @@ def _load_scanner_data(db_path: str) -> pd.DataFrame:
         return pd.DataFrame()
     finally:
         conn.close()
+
+
+def _load_scanner_data(db_path: str) -> pd.DataFrame:
+    """Return scanner data — prefers background cache, falls back to direct compute."""
+    if "scanner" in _bg_cache and not _bg_cache["scanner"].empty:
+        return _bg_cache["scanner"]
+    # First load before scheduler has run
+    return _compute_scanner_data(db_path)
 
 
 @st.cache_data(ttl=60)
@@ -209,7 +246,10 @@ def main():
         st.info("No database found. Run `python main.py fetch` to get started.")
         return
 
-    # Load scanner data
+    # Start background scheduler (once per server process)
+    _start_scheduler()
+
+    # Load scanner data (from background cache or direct compute)
     start = time.perf_counter()
     scanner_df = _load_scanner_data(db_path)
     load_time = time.perf_counter() - start
@@ -222,12 +262,14 @@ def main():
         st.divider()
         _render_chart(db_path, symbol, timeframe)
 
-    # Footer
-    st.caption(f"Data loaded in {load_time:.3f}s | Auto-refreshes every 60s")
-
-    # Auto-refresh via rerun (Story 4.4)
-    time.sleep(60)
-    st.rerun()
+    # Footer with refresh button
+    col_foot1, col_foot2 = st.columns([4, 1])
+    with col_foot1:
+        st.caption(f"Data loaded in {load_time:.3f}s | Background refresh every 60s")
+    with col_foot2:
+        if st.button("Refresh Now"):
+            _refresh_scanner_data()
+            st.rerun()
 
 
 if __name__ == "__main__":

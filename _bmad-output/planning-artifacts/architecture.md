@@ -140,12 +140,23 @@ cd rabbit-quant
 
 | Layer | Pattern | Scope |
 |-------|---------|-------|
-| Data fetching | asyncio + aiohttp | data_loader module |
+| Data fetching | asyncio + aiohttp | data_loader module (Writer Service) |
 | Signal math | Numba @njit(parallel=True) | signals/ modules |
 | Batch compute | ProcessPoolExecutor | backtest/ multi-asset jobs |
-| Dashboard | Streamlit event loop | dashboard/ (single-threaded) |
+| Dashboard | Streamlit event loop | dashboard/ (Reader Only) |
 
 **Boundary rule:** asyncio never enters signals/. Numba never enters data_loader. ProcessPoolExecutor orchestrates multi-asset signal computation.
+
+### Production Deployment Strategy
+
+**Writer Service Pattern:**
+To solve DuckDB's single-writer limitation in server environments, the system splits into two distinct processes:
+1.  **Writer Service (`run-scheduler`):** A standalone daemon that owns the write lock. It executes `fetch_all_assets` on a schedule (e.g., every 5 minutes).
+2.  **Reader App (`dashboard`):** The Streamlit application that connects to DuckDB in `read_only=True` mode. It never writes to the database.
+
+**Local Workstation vs. Server:**
+- **Local:** `main.py fetch` runs on-demand. `main.py dashboard` runs independently. Conflicts handled by user serialization.
+- **Server:** `main.py run-scheduler` runs continuously in background. `main.py dashboard` serves UI.
 
 ### Configuration & Observability
 

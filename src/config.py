@@ -50,6 +50,10 @@ class AppSettings(BaseSettings):
     # Data source
     yfinance_proxy: str = Field(default="", description="Proxy for yfinance requests")
 
+    # Notifications
+    telegram_bot_token: str = Field(default="", description="Telegram Bot Token for alerts")
+    telegram_chat_id: str = Field(default="", description="Telegram Chat ID for alerts")
+
 
 class AssetConfig:
     """Asset lists loaded from config/assets.toml."""

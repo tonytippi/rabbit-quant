@@ -38,7 +38,7 @@ def cmd_backtest(args: argparse.Namespace) -> None:
     """Run backtesting with configured strategy."""
     from pathlib import Path
 
-    from src.backtest.analyzer import export_trade_log_csv, find_best_params, recommend_config
+    from src.backtest.analyzer import export_trade_log_csv, find_best_params, recommend_config, update_strategy_config
     from src.backtest.vbt_runner import run_backtest, run_parameter_sweep
     from src.data_loader import query_ohlcv
     from src.signals.cycles import detect_dominant_cycle_filtered
@@ -96,10 +96,29 @@ def cmd_backtest(args: argparse.Namespace) -> None:
             sweep_df.to_csv(sweep_path, index=False)
             print(f"\nFull results saved: {sweep_path}")
 
-            # Show recommendation
+            # Show recommendation and prompt user to apply
             rec = recommend_config(sweep_df)
             if rec:
-                print(f"\nRecommended config: hurst_threshold={rec['hurst_threshold']}")
+                print(f"\nRecommended config:")
+                print(f"  hurst_threshold = {rec['hurst_threshold']}")
+                print(f"  phase_long      = {rec['phase_long']}")
+                print(f"  phase_short     = {rec['phase_short']}")
+                print(f"  (Sharpe={rec['sharpe_ratio']:.4f}, "
+                      f"Return={rec['total_return']:.2f}%, "
+                      f"MaxDD={rec['max_drawdown']:.2f}%)")
+
+                try:
+                    answer = input("\nApply these parameters to strategy.toml? [y/N]: ").strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    answer = "n"
+
+                if answer == "y":
+                    if update_strategy_config(rec):
+                        print("Strategy config updated successfully.")
+                    else:
+                        print("Failed to update config. Check logs for details.")
+                else:
+                    print("Skipped config update.")
 
         else:
             # Single backtest mode
@@ -164,6 +183,18 @@ def main() -> None:
     dashboard_parser = subparsers.add_parser("dashboard", help="Launch Streamlit dashboard")
     dashboard_parser.set_defaults(func=cmd_dashboard)
 
+    # backtest-all command
+    bulk_parser = subparsers.add_parser("backtest-all", help="Run bulk backtest across all assets and timeframes")
+    bulk_parser.add_argument("--type", default="crypto", choices=["crypto", "stocks"], help="Asset type (default: crypto)")
+    bulk_parser.add_argument("--sweep", action="store_true", help="Run parameter sweep for optimization")
+    bulk_parser.add_argument("--fetch", action="store_true", help="Fetch latest data before running")
+    bulk_parser.set_defaults(func=cmd_backtest_all)
+
+    # run-scheduler command
+    scheduler_parser = subparsers.add_parser("run-scheduler", help="Run background data ingestion scheduler (Writer Service)")
+    scheduler_parser.add_argument("--interval", "-i", type=int, default=5, help="Fetch interval in minutes (default: 5)")
+    scheduler_parser.set_defaults(func=cmd_run_scheduler)
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -171,6 +202,30 @@ def main() -> None:
         sys.exit(0)
 
     args.func(args)
+
+
+def cmd_run_scheduler(args: argparse.Namespace) -> None:
+    """Run the Writer Service scheduler."""
+    from src.services.scheduler import run_scheduler_service
+
+    logger.info(f"Launching Writer Service with {args.interval}m interval...")
+    asyncio.run(run_scheduler_service(_settings, _assets, _timeframes, interval=args.interval))
+
+
+def cmd_backtest_all(args: argparse.Namespace) -> None:
+    """Run bulk backtest command."""
+    from src.backtest.bulk_runner import run_bulk_backtest
+
+    # Run async function
+    asyncio.run(run_bulk_backtest(
+        _settings,
+        _assets,
+        _strategy,
+        _timeframes,
+        asset_type=args.type,
+        sweep=args.sweep,
+        fetch=args.fetch
+    ))
 
 
 if __name__ == "__main__":

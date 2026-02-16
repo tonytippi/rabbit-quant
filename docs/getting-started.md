@@ -28,6 +28,8 @@ cp .env.example .env
 | `LOG_LEVEL` | `INFO` | Logging level (DEBUG/INFO/WARNING/ERROR) |
 | `LOG_PATH` | `logs/rabbit.log` | Log file path |
 | `YFINANCE_PROXY` | _(empty)_ | HTTP proxy for yfinance requests |
+| `TELEGRAM_BOT_TOKEN` | _(empty)_ | Token from @BotFather for trade alerts |
+| `TELEGRAM_CHAT_ID` | _(empty)_ | Chat ID to receive alerts |
 
 ### Asset Watchlist (`config/assets.toml`)
 
@@ -126,10 +128,31 @@ Top 3 by Sharpe Ratio:
 
 Full results saved to `data/backtest/sweep_AAPL_1d.csv`.
 
-### 4. Launch Dashboard
+### 4. Bulk Backtesting & Market Scanning
 
 ```bash
-uv run streamlit run src/dashboard/app.py
+uv run python main.py backtest-all --type crypto --sweep --fetch
+```
+
+Optimizes the strategy for **every** symbol in your watchlist across **all** timeframes in a single run. The `--fetch` flag ensures all data is fresh before starting.
+
+**Output example:**
+```
+Bulk run complete in 86.1s. Processed 48 combinations.
+
+=== LEADERBOARD (Top 10) ===
+    symbol timeframe  sharpe_ratio  total_return  max_drawdown  best_hurst_threshold
+ AVAX/USDT        1d      1.970207   4204.827466     49.719854                   0.5
+  SOL/USDT        1h      1.779964    104.330773      9.085976                   0.5
+ ...
+```
+
+Consolidated results are saved to `data/backtest/summary_bulk_crypto.csv`.
+
+### 5. Launch Dashboard
+
+```bash
+uv run python main.py dashboard
 ```
 
 Opens browser at `http://localhost:8501` with:
@@ -240,6 +263,27 @@ uv run python main.py backtest -s AAPL -t 4h --sweep
 - **Max Drawdown**: Keep below 20% for sustainable strategies.
 - **Total Trades**: Too few (<10) means insufficient statistical significance.
 - **Walk-forward**: Split data into in-sample (optimize) and out-of-sample (validate) periods manually by adjusting the fetch date range.
+
+### 6. Server Deployment (Writer Service)
+
+For server deployments where multiple components (Dashboard, Backtester) need concurrent access, use the **Writer Service** to avoid DuckDB locking conflicts.
+
+**Features:**
+*   **Automatic Data Ingestion:** Fetches new market data every X minutes.
+*   **Headless Signal Scanning:** Calculates signals immediately after fetching.
+*   **Telegram Alerts:** Sends instant notifications for BUY/SELL signals if configured in `.env`.
+
+**Step 1: Start the Ingestion Service (The Writer)**
+This process owns the write lock and updates data periodically.
+```bash
+uv run python main.py run-scheduler --interval 5
+```
+
+**Step 2: Start the Dashboard (The Reader)**
+The dashboard connects in read-only mode and will see updates from the Writer Service.
+```bash
+uv run python main.py dashboard
+```
 
 ---
 

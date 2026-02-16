@@ -47,12 +47,13 @@ def _resolve_db_path(settings: AppSettings) -> Path:
     return db_path
 
 
-def get_connection(settings: AppSettings) -> duckdb.DuckDBPyConnection:
+def get_connection(settings: AppSettings, read_only: bool = False) -> duckdb.DuckDBPyConnection:
     """Get a DuckDB connection, creating the database and table if needed."""
     db_path = _resolve_db_path(settings)
-    conn = duckdb.connect(str(db_path))
-    conn.execute(CREATE_TABLE_SQL)
-    logger.debug(f"DuckDB connected: {db_path}")
+    conn = duckdb.connect(str(db_path), read_only=read_only)
+    if not read_only:
+        conn.execute(CREATE_TABLE_SQL)
+    logger.debug(f"DuckDB connected: {db_path} (read_only={read_only})")
     return conn
 
 

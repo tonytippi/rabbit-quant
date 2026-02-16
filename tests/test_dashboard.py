@@ -4,7 +4,7 @@ import duckdb
 import numpy as np
 import pandas as pd
 
-from src.dashboard.app import _load_scanner_data
+from src.dashboard.app import _bg_cache, _load_scanner_data
 
 
 def _seed_db(db_path: str, symbol: str = "AAPL", timeframe: str = "1d", n: int = 500) -> None:
@@ -44,13 +44,17 @@ def _seed_db(db_path: str, symbol: str = "AAPL", timeframe: str = "1d", n: int =
     conn.close()
 
 
+def _clear_bg_cache():
+    """Clear the background cache for test isolation."""
+    _bg_cache.clear()
+
+
 class TestLoadScannerData:
     def test_returns_dataframe(self, tmp_path):
         db_path = str(tmp_path / "test.duckdb")
         _seed_db(db_path)
 
-        # Clear Streamlit cache for test isolation
-        _load_scanner_data.clear()
+        _clear_bg_cache()
         result = _load_scanner_data(db_path)
         assert isinstance(result, pd.DataFrame)
         assert not result.empty
@@ -59,7 +63,7 @@ class TestLoadScannerData:
         db_path = str(tmp_path / "test.duckdb")
         _seed_db(db_path)
 
-        _load_scanner_data.clear()
+        _clear_bg_cache()
         result = _load_scanner_data(db_path)
         assert "Symbol" in result.columns
         assert "Hurst" in result.columns
@@ -71,7 +75,7 @@ class TestLoadScannerData:
         _seed_db(db_path, symbol="AAPL")
         _seed_db(db_path, symbol="MSFT")
 
-        _load_scanner_data.clear()
+        _clear_bg_cache()
         result = _load_scanner_data(db_path)
         assert len(result) == 2
         symbols = result["Symbol"].tolist()
@@ -90,7 +94,7 @@ class TestLoadScannerData:
         """)
         conn.close()
 
-        _load_scanner_data.clear()
+        _clear_bg_cache()
         result = _load_scanner_data(db_path)
         assert result.empty
 
@@ -98,7 +102,7 @@ class TestLoadScannerData:
         db_path = str(tmp_path / "test.duckdb")
         _seed_db(db_path)
 
-        _load_scanner_data.clear()
+        _clear_bg_cache()
         result = _load_scanner_data(db_path)
         valid_signals = {"LONG", "SHORT", "NEUTRAL"}
         for sig in result["Signal"]:
@@ -108,7 +112,7 @@ class TestLoadScannerData:
         db_path = str(tmp_path / "test.duckdb")
         _seed_db(db_path)
 
-        _load_scanner_data.clear()
+        _clear_bg_cache()
         result = _load_scanner_data(db_path)
         for h in result["Hurst"]:
             assert 0.0 <= h <= 1.0
