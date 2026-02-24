@@ -18,7 +18,7 @@ from src.config import AppSettings, AssetConfig, StrategyConfig, TimeframeConfig
 from src.data_loader import get_connection, query_ohlcv
 from src.fetchers.orchestrator import fetch_all_assets
 from src.signals.cycles import detect_dominant_cycle_filtered
-from src.signals.fractals import calculate_hurst, calculate_chop
+from src.signals.fractals import calculate_rolling_hurst, calculate_chop
 from src.signals.filters import calculate_atr_zscore_series
 
 
@@ -82,11 +82,11 @@ async def run_bulk_backtest(
             if not cycle_result:
                 continue
                 
-            hurst_value = calculate_hurst(df)
-            
             df_time = df.copy()
             df_time["timestamp"] = pd.to_datetime(df_time["timestamp"])
             df_time.set_index("timestamp", inplace=True)
+            
+            rolling_hurst = calculate_rolling_hurst(df_time, window=30).shift(1).ffill()
             
             close_dict[sym] = df_time["close_price"]
             high_dict[sym] = df_time["high_price"]
@@ -94,7 +94,7 @@ async def run_bulk_backtest(
             
             atr_dict[sym] = _calculate_atr_series(df_time, period=14)
             phase_dict[sym] = pd.Series(cycle_result["phase_array"], index=df_time.index)
-            hurst_dict[sym] = hurst_value
+            hurst_dict[sym] = rolling_hurst
             
             # LTF metrics
             ltf_dict[sym] = calculate_chop(df_time)
@@ -144,9 +144,8 @@ async def run_bulk_backtest(
         volatility_adjusted_momentum = momentum / matrix_atr
         matrix_rank = volatility_adjusted_momentum.fillna(0).replace([np.inf, -np.inf], 0)
         
-        matrix_hurst = np.zeros(matrix_close.shape)
-        for i, sym in enumerate(matrix_close.columns):
-            matrix_hurst[:, i] = hurst_dict.get(sym, strategy.hurst_threshold)
+        matrix_hurst_df = pd.DataFrame(hurst_dict).reindex(matrix_close.index).ffill().fillna(strategy.hurst_threshold)
+        matrix_hurst = matrix_hurst_df.values
 
         # 3. Call the Engine EXACTLY ONCE with the full StrategyConfig
         freq_str = tf.replace("m", "min")

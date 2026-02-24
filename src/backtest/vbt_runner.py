@@ -28,9 +28,11 @@ def simulate_portfolio_nb(
     volatility_zscore: np.ndarray,
     htf_direction: np.ndarray,
     rank_metric: np.ndarray,
+    hurst_value: np.ndarray,
     htf_threshold: float,
     ltf_threshold: float,
     veto_threshold: float,
+    hurst_threshold: float,
     trailing_multiplier: float,
     breakeven_threshold: float,
     phase_long_center: float,
@@ -117,7 +119,7 @@ def simulate_portfolio_nb(
                     continue
                     
                 phase = phase_array[i, a] % (2.0 * np.pi)
-                valid = (htf_metric[i, a] < htf_threshold) and (ltf_metric[i, a] > ltf_threshold) and (volatility_zscore[i, a] < veto_threshold)
+                valid = (htf_metric[i, a] < htf_threshold) and (ltf_metric[i, a] > ltf_threshold) and (volatility_zscore[i, a] < veto_threshold) and (hurst_value[i, a] > hurst_threshold)
                 if not valid:
                     continue
                     
@@ -173,11 +175,10 @@ def build_entries_exits(
     ltf_threshold: float = 61.8, 
     veto_threshold: float = 3.0,
     trailing_multiplier: float = 2.0,
-    breakeven_threshold: float = 1.0,
-    max_concurrent_trades: int = 3,
-    hurst_value: float = 0.6, 
-    hurst_threshold: float = 0.6, 
-    phase_long_center: float = 4.712,  
+        breakeven_threshold: float = 1.0,
+        max_concurrent_trades: int = 3,
+        hurst_value: np.ndarray | float = 0.6,
+        hurst_threshold: float = 0.6,    phase_long_center: float = 4.712,  
     phase_short_center: float = 1.571,  
     phase_tolerance: float = 0.785,  
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -210,9 +211,14 @@ def build_entries_exits(
     hd_2d = to_2d(htf_direction).astype(np.float64) if htf_direction is not None else np.ones_like(c_2d)
     rm_2d = to_2d(rank_metric).astype(np.float64) if rank_metric is not None else np.zeros_like(c_2d)
 
+    if isinstance(hurst_value, (float, int)):
+        hv_2d = np.full_like(c_2d, float(hurst_value))
+    else:
+        hv_2d = to_2d(hurst_value).astype(np.float64)
+
     long_entries, long_exits, short_entries, short_exits = simulate_portfolio_nb(
-        c_2d, h_2d, l_2d, a_2d, p_2d, ltf_m, htf_m, vz_2d, hd_2d, rm_2d,
-        float(htf_threshold), float(ltf_threshold), float(veto_threshold),
+        c_2d, h_2d, l_2d, a_2d, p_2d, ltf_m, htf_m, vz_2d, hd_2d, rm_2d, hv_2d,
+        float(htf_threshold), float(ltf_threshold), float(veto_threshold), float(hurst_threshold),
         float(trailing_multiplier), float(breakeven_threshold),
         float(phase_long_center), float(phase_short_center), float(phase_tolerance),
         int(max_concurrent_trades)
@@ -229,7 +235,7 @@ def run_backtest(
     low: pd.Series | pd.DataFrame | None = None,
     atr: pd.Series | pd.DataFrame | None = None,
     phase_array: np.ndarray | None = None,
-    hurst_value: float = 0.6,
+    hurst_value: np.ndarray | float = 0.6,
     ltf_metric: np.ndarray | None = None,
     htf_metric: np.ndarray | None = None,
     volatility_zscore: np.ndarray | None = None,
@@ -333,7 +339,7 @@ def run_parameter_sweep(
     low: pd.Series | pd.DataFrame | None = None,
     atr: pd.Series | pd.DataFrame | None = None,
     phase_array: np.ndarray | None = None,
-    hurst_value: float = 0.6,
+    hurst_value: np.ndarray | float = 0.6,
     ltf_metric: np.ndarray | None = None,
     htf_metric: np.ndarray | None = None,
     volatility_zscore: np.ndarray | None = None,

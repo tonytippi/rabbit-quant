@@ -43,6 +43,32 @@ def calculate_hurst(df: pd.DataFrame, column: str = "close_price") -> float:
         return 0.5
 
 
+def calculate_rolling_hurst(df: pd.DataFrame, column: str = "close_price", window: int = 30) -> pd.Series:
+    """Calculate Rolling Hurst Exponent from OHLCV DataFrame."""
+    if df is None or len(df) < window:
+        logger.warning(f"Insufficient data for rolling Hurst: need {window}+ rows")
+        return pd.Series(0.5, index=df.index if df is not None else [])
+
+    try:
+        prices = df[column].values.astype(np.float64)
+        rolling_hurst = _rolling_hurst_rs(prices, window)
+        return pd.Series(rolling_hurst, index=df.index)
+    except Exception as e:
+        logger.error(f"Rolling Hurst calculation failed: {e}")
+        return pd.Series(0.5, index=df.index)
+
+
+@numba.njit(cache=True)
+def _rolling_hurst_rs(prices: np.ndarray, window: int) -> np.ndarray:
+    n = len(prices)
+    out = np.full(n, 0.5, dtype=np.float64)
+    if n < window:
+        return out
+    for i in range(window - 1, n):
+        out[i] = _hurst_rs(prices[i - window + 1 : i + 1])
+    return out
+
+
 @numba.njit(cache=True)
 def _hurst_rs(prices: np.ndarray) -> float:
     """Compute Hurst Exponent using the Rescaled Range (R/S) method.
