@@ -6,20 +6,20 @@ providing a consolidated summary report and leaderboard.
 
 import asyncio
 import time
-from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 from loguru import logger
 
-from src.backtest.analyzer import recommend_config
+from src.backtest.analyzer import recommend_config, export_trade_log_csv
 from src.backtest.vbt_runner import run_parameter_sweep, run_backtest
 from src.config import AppSettings, AssetConfig, StrategyConfig, TimeframeConfig
 from src.data_loader import get_connection, query_ohlcv
 from src.fetchers.orchestrator import fetch_all_assets
 from src.signals.cycles import detect_dominant_cycle_filtered
-from src.signals.fractals import calculate_hurst
+from src.signals.fractals import calculate_hurst, calculate_chop
+from src.signals.filters import calculate_atr_zscore_series
 
 
 def _calculate_atr_series(df: pd.DataFrame, period: int = 14) -> pd.Series:
@@ -35,45 +35,6 @@ def _calculate_atr_series(df: pd.DataFrame, period: int = 14) -> pd.Series:
     
     atr = tr.rolling(window=period).mean()
     return atr.bfill()
-
-
-def _process_single_symbol_data(
-    settings: AppSettings,
-    strategy: StrategyConfig,
-    symbol: str,
-    timeframe: str,
-) -> dict | None:
-    """Fetch and compute signals for a single symbol to be aggregated."""
-    try:
-        conn = get_connection(settings, read_only=True)
-        df = query_ohlcv(conn, symbol, timeframe)
-        conn.close()
-
-        if df.empty or len(df) < strategy.hurst_min_data_points:
-            return None
-
-        # Compute signals
-        cycle_result = detect_dominant_cycle_filtered(df, cutoff=strategy.cycle_lowpass_cutoff)
-        hurst_value = calculate_hurst(df)
-
-        if cycle_result is None:
-            return None
-
-        df = df.set_index("timestamp")
-        
-        return {
-            "symbol": symbol,
-            "close": df["close_price"],
-            "high": df["high_price"],
-            "low": df["low_price"],
-            "atr": _calculate_atr_series(df, period=14),
-            "phase": pd.Series(cycle_result["phase_array"], index=df.index),
-            "hurst": hurst_value
-        }
-
-    except Exception as e:
-        logger.error(f"Error processing {symbol}/{timeframe}: {e}")
-        return None
 
 
 async def run_bulk_backtest(
@@ -101,55 +62,94 @@ async def run_bulk_backtest(
     start_time = time.monotonic()
 
     results = []
+    conn = get_connection(settings, read_only=True)
 
+    # Group by Timeframe, NOT by Symbol
     for tf in tfs:
         logger.info(f"Processing timeframe: {tf}")
-        # 1. Fetch all data into a 2D Matrix (Columns = Assets, Rows = Time)
-        tasks_data = []
-        with ProcessPoolExecutor() as executor:
-            futures = []
-            for sym in symbols:
-                futures.append(executor.submit(
-                    _process_single_symbol_data, settings, strategy, sym, tf
-                ))
+        
+        close_dict, high_dict, low_dict = {}, {}, {}
+        atr_dict, phase_dict, hurst_dict = {}, {}, {}
+        ltf_dict, htf_dict, vol_z_dict, htf_dir_dict = {}, {}, {}, {}
 
-            for future in as_completed(futures):
-                res = future.result()
-                if res:
-                    tasks_data.append(res)
-        
-        if not tasks_data:
+        # 1. Fetch and calculate indicators for all symbols
+        for sym in symbols:
+            df = query_ohlcv(conn, sym, tf)
+            if df.empty or len(df) < strategy.hurst_min_data_points:
+                continue
+            
+            cycle_result = detect_dominant_cycle_filtered(df, cutoff=strategy.cycle_lowpass_cutoff)
+            if not cycle_result:
+                continue
+                
+            hurst_value = calculate_hurst(df)
+            
+            df_time = df.copy()
+            df_time["timestamp"] = pd.to_datetime(df_time["timestamp"])
+            df_time.set_index("timestamp", inplace=True)
+            
+            close_dict[sym] = df_time["close_price"]
+            high_dict[sym] = df_time["high_price"]
+            low_dict[sym] = df_time["low_price"]
+            
+            atr_dict[sym] = _calculate_atr_series(df_time, period=14)
+            phase_dict[sym] = pd.Series(cycle_result["phase_array"], index=df_time.index)
+            hurst_dict[sym] = hurst_value
+            
+            # LTF metrics
+            ltf_dict[sym] = calculate_chop(df_time)
+            vol_z_dict[sym] = calculate_atr_zscore_series(df_time)
+            
+            # HTF metrics
+            daily_df = df_time.resample("1D").agg({
+                "open_price": "first",
+                "high_price": "max",
+                "low_price": "min",
+                "close_price": "last",
+                "volume": "sum"
+            }).dropna()
+            
+            if not daily_df.empty:
+                daily_chop = calculate_chop(daily_df)
+                safe_daily_chop = daily_chop.shift(1)
+                
+                daily_sma = daily_df["close_price"].rolling(window=50).mean()
+                daily_direction = np.where(daily_df["close_price"] > daily_sma, 1, -1)
+                safe_daily_dir = pd.Series(daily_direction, index=daily_df.index).shift(1)
+                
+                htf_dict[sym] = safe_daily_chop.reindex(df_time.index).ffill().fillna(50.0)
+                htf_dir_dict[sym] = safe_daily_dir.reindex(df_time.index).ffill().fillna(0)
+            else:
+                htf_dict[sym] = pd.Series(50.0, index=df_time.index)
+                htf_dir_dict[sym] = pd.Series(0.0, index=df_time.index)
+
+        if not close_dict:
             continue
-            
-        # 2. Align into 2D Matrices on the same timestamps
-        close_list = []
-        high_list = []
-        low_list = []
-        atr_list = []
-        phase_list = []
-        hurst_dict = {}
+
+        # 2. Build the 2D Matrices
+        matrix_close = pd.DataFrame(close_dict).ffill().bfill()
+        matrix_high = pd.DataFrame(high_dict).reindex(matrix_close.index).ffill().bfill()
+        matrix_low = pd.DataFrame(low_dict).reindex(matrix_close.index).ffill().bfill()
+        matrix_atr = pd.DataFrame(atr_dict).reindex(matrix_close.index).ffill().fillna(0.0)
+        matrix_phase = pd.DataFrame(phase_dict).reindex(matrix_close.index).ffill().fillna(0.0)
         
-        for data in tasks_data:
-            sym = data["symbol"]
-            close_list.append(data["close"].rename(sym))
-            high_list.append(data["high"].rename(sym))
-            low_list.append(data["low"].rename(sym))
-            atr_list.append(data["atr"].rename(sym))
-            phase_list.append(data["phase"].rename(sym))
-            hurst_dict[sym] = data["hurst"]
-            
-        matrix_close = pd.concat(close_list, axis=1).ffill().dropna()
-        matrix_high = pd.concat(high_list, axis=1).reindex(matrix_close.index).ffill()
-        matrix_low = pd.concat(low_list, axis=1).reindex(matrix_close.index).ffill()
-        matrix_atr = pd.concat(atr_list, axis=1).reindex(matrix_close.index).ffill()
-        matrix_phase = pd.concat(phase_list, axis=1).reindex(matrix_close.index).ffill()
+        matrix_ltf = pd.DataFrame(ltf_dict).reindex(matrix_close.index).ffill().fillna(100.0)
+        matrix_htf = pd.DataFrame(htf_dict).reindex(matrix_close.index).ffill().fillna(50.0)
+        matrix_vol_z = pd.DataFrame(vol_z_dict).reindex(matrix_close.index).ffill().fillna(0.0)
+        matrix_htf_dir = pd.DataFrame(htf_dir_dict).reindex(matrix_close.index).ffill().fillna(0.0)
         
-        # Build hurst 2D array matching the shape
+        # Volatility-Adjusted Momentum Ranking
+        lookback = 24
+        momentum = matrix_close.diff(lookback)
+        volatility_adjusted_momentum = momentum / matrix_atr
+        matrix_rank = volatility_adjusted_momentum.fillna(0).replace([np.inf, -np.inf], 0)
+        
         matrix_hurst = np.zeros(matrix_close.shape)
         for i, sym in enumerate(matrix_close.columns):
-            matrix_hurst[:, i] = hurst_dict[sym]
+            matrix_hurst[:, i] = hurst_dict.get(sym, strategy.hurst_threshold)
 
-        # 3. Call the engine EXACTLY ONCE, passing the config correctly
+        # 3. Call the Engine EXACTLY ONCE with the full StrategyConfig
+        freq_str = tf.replace("m", "min")
         res = run_backtest(
             close=matrix_close,
             high=matrix_high,
@@ -157,13 +157,19 @@ async def run_bulk_backtest(
             atr=matrix_atr,
             phase_array=matrix_phase.values,
             hurst_value=matrix_hurst,
+            ltf_metric=matrix_ltf.values,
+            htf_metric=matrix_htf.values,
+            volatility_zscore=matrix_vol_z.values,
+            htf_direction=matrix_htf_dir.values,
+            rank_metric=matrix_rank.values,
             hurst_threshold=strategy.hurst_threshold,
-            trailing_multiplier=strategy.trailing_atr_multiplier,
-            breakeven_threshold=strategy.breakeven_atr_threshold,
-            max_concurrent_trades=strategy.max_concurrent_trades,
-            risk_per_trade=strategy.risk_per_trade,
+            trailing_multiplier=strategy.trailing_atr_multiplier, # FIXED
+            breakeven_threshold=strategy.breakeven_atr_threshold, # FIXED
+            max_concurrent_trades=strategy.max_concurrent_trades, # FIXED
+            risk_per_trade=strategy.risk_per_trade,               # FIXED
             initial_capital=strategy.backtest_initial_capital,
             commission=strategy.backtest_commission,
+            freq=freq_str
         )
 
         if res:
@@ -173,11 +179,12 @@ async def run_bulk_backtest(
             results.append(res)
             
             # Export trade log for this timeframe
-            from src.backtest.analyzer import export_trade_log_csv
             output_dir = Path(strategy.backtest_output_dir)
             output_dir.mkdir(parents=True, exist_ok=True)
             csv_path = output_dir / f"trades_PORTFOLIO_{tf}.csv"
             export_trade_log_csv(res["portfolio"], str(csv_path), symbol="PORTFOLIO")
+
+    conn.close()
 
     elapsed = time.monotonic() - start_time
     print(f"\n\nBulk run complete in {elapsed:.1f}s. Processed {len(tfs)} timeframes.")
