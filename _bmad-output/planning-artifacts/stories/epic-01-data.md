@@ -126,3 +126,23 @@ So that updates complete within 60 seconds.
 **Given** concurrent fetching is running
 **When** I check system resource usage
 **Then** RAM stays within reasonable bounds (no memory leak from concurrent connections)
+
+### Story 1.6: PostgreSQL Migration
+
+As a **devops engineer**,
+I want to migrate the data storage layer from DuckDB to PostgreSQL,
+So that multiple processes (Scheduler, Dashboard, Backtester) can read/write concurrently without file locking issues.
+
+**Acceptance Criteria:**
+
+**Given** a valid PostgreSQL connection string in `.env` (e.g., `DATABASE_URL=postgresql://user:pass@localhost:5432/rabbit`)
+**When** the application starts
+**Then** `src/data_loader.py` connects to Postgres instead of DuckDB (using `psycopg2` or `asyncpg`)
+
+**Given** the Postgres database is empty
+**When** the schema initializes
+**Then** the `ohlcv` table is created with `(symbol, timeframe, timestamp)` as the Primary Key or Unique Index
+
+**Given** new market data fetching occurs
+**When** `upsert_ohlcv` is called
+**Then** it uses PostgreSQL's `INSERT ... ON CONFLICT DO UPDATE` syntax to handle duplicates correctly

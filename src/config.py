@@ -42,6 +42,23 @@ class AppSettings(BaseSettings):
 
     # Database
     duckdb_path: str = Field(default="data/rabbit.duckdb", description="Path to DuckDB database file")
+    
+    # Postgres (Optional)
+    database_host: str = Field(default="", description="Postgres Host")
+    database_port: int = Field(default=5432, description="Postgres Port")
+    database_name: str = Field(default="", description="Postgres DB Name")
+    database_user: str = Field(default="", description="Postgres User")
+    database_password: str = Field(default="", description="Postgres Password")
+
+    @property
+    def use_postgres(self) -> bool:
+        return bool(self.database_host and self.database_name and self.database_user)
+
+    @property
+    def database_url(self) -> str:
+        if not self.use_postgres:
+            return ""
+        return f"postgresql://{self.database_user}:{self.database_password}@{self.database_host}:{self.database_port}/{self.database_name}"
 
     # Logging
     log_level: str = Field(default="INFO", description="Logging level")
@@ -95,6 +112,26 @@ class StrategyConfig:
         self.backtest_initial_capital: float = backtest.get("initial_capital", 100000.0)
         self.backtest_commission: float = backtest.get("commission", 0.001)
         self.backtest_output_dir: str = backtest.get("output_dir", "data/backtest")
+        self.backtest_trailing_atr_multiplier_range: list[float] = backtest.get("trailing_atr_multiplier_range", [1.5, 2.0, 2.5, 3.0])
+
+        # Risk settings
+        risk = data.get("risk", {})
+        self.risk_per_trade: float = risk.get("risk_per_trade", 0.02)
+        self.trailing_atr_multiplier: float = risk.get("trailing_atr_multiplier", 3.0)
+        self.breakeven_atr_threshold: float = risk.get("breakeven_atr_threshold", 2.0)
+        self.max_portfolio_exposure: float = risk.get("max_portfolio_exposure", 0.06)
+        self.max_concurrent_trades: int = risk.get("max_concurrent_trades", 3)
+
+
+class PaperConfig:
+    """Paper trading parameters loaded from config/strategy.toml."""
+
+    def __init__(self) -> None:
+        data = _load_toml("strategy.toml")
+        paper = data.get("paper", {})
+        self.initial_balance: float = paper.get("initial_balance", 10000.0)
+        self.fixed_position_size: float = paper.get("fixed_position_size", 1000.0)
+        self.use_dynamic_sizing: bool = paper.get("use_dynamic_sizing", False)
 
 
 class TimeframeConfig:
@@ -128,12 +165,13 @@ def setup_logging(settings: AppSettings) -> None:
     )
 
 
-def load_config() -> tuple[AppSettings, AssetConfig, StrategyConfig, TimeframeConfig]:
+def load_config() -> tuple[AppSettings, AssetConfig, StrategyConfig, TimeframeConfig, PaperConfig]:
     """Load all configuration. Call once at startup."""
     settings = AppSettings()
     setup_logging(settings)
     assets = AssetConfig()
     strategy = StrategyConfig()
     timeframes = TimeframeConfig()
+    paper = PaperConfig()
     logger.info("Configuration loaded successfully")
-    return settings, assets, strategy, timeframes
+    return settings, assets, strategy, timeframes, paper

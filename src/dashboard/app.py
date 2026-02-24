@@ -66,6 +66,7 @@ def _compute_scanner_data(db_path: str) -> pd.DataFrame:
 
     from src.signals.cycles import detect_dominant_cycle_filtered
     from src.signals.fractals import calculate_hurst
+    from src.signals.filters import generate_signal
 
     conn = duckdb.connect(db_path, read_only=True)
 
@@ -87,31 +88,29 @@ def _compute_scanner_data(db_path: str) -> pd.DataFrame:
 
             if df.empty or len(df) < 20:
                 continue
+            
+            # Fetch HTF data (assume '1d' is HTF for MTF logic)
+            df_htf = conn.execute(
+                "SELECT * FROM ohlcv WHERE symbol = ? AND timeframe = '1d' ORDER BY timestamp",
+                [sym],
+            ).fetchdf()
 
-            hurst = calculate_hurst(df)
-            cycle = detect_dominant_cycle_filtered(df, cutoff=0.1)
-
-            signal = "neutral"
-            dominant_period = 0
-            current_phase = 0.0
-            amplitude = 0.0
-
-            if cycle:
-                dominant_period = cycle["dominant_period"]
-                current_phase = cycle["current_phase"]
-                amplitude = cycle["amplitude"]
-
-                from src.signals.filters import _determine_signal
-                signal = _determine_signal(current_phase, hurst, 0.6)
+            # Generate full signal dict with MTF
+            sig_data = generate_signal(df, sym, tf, hurst_threshold=0.6, lowpass_cutoff=0.1, htf_df=df_htf)
+            
+            if sig_data is None:
+                continue
 
             rows.append({
                 "Symbol": sym,
                 "Timeframe": tf,
-                "Hurst": round(hurst, 4),
-                "Dominant Cycle": dominant_period,
-                "Phase": round(current_phase, 2),
-                "Amplitude": round(amplitude, 2),
-                "Signal": signal.upper(),
+                "LTF Hurst": round(sig_data["hurst_value"], 4),
+                "HTF Hurst": round(sig_data["htf_hurst_value"], 4) if sig_data.get("htf_hurst_value") else None,
+                "Dominant Cycle": sig_data["dominant_period"],
+                "Phase": round(sig_data["current_phase"], 2),
+                "Amplitude": round(sig_data["amplitude"], 2),
+                "Veto Z": round(sig_data["atr_zscore"], 2),
+                "Signal": sig_data["signal"].upper(),
                 "Last Price": round(float(df["close_price"].iloc[-1]), 2),
             })
 
@@ -167,7 +166,7 @@ def _render_scanner(scanner_df: pd.DataFrame) -> tuple[str, str] | None:
             return "color: #ef5350; font-weight: bold"
         return ""
 
-    styled = scanner_df.style.applymap(_highlight_signal, subset=["Signal"])
+    styled = scanner_df.style.map(_highlight_signal, subset=["Signal"])
     st.dataframe(styled, use_container_width=True, height=300)
 
     # Symbol selector
@@ -185,10 +184,9 @@ def _render_scanner(scanner_df: pd.DataFrame) -> tuple[str, str] | None:
 
 def _render_chart(db_path: str, symbol: str, timeframe: str) -> None:
     """Render candlestick chart with overlays for selected symbol."""
+    import duckdb
     from src.dashboard.charts import create_candlestick_chart
-    from src.signals.cycles import detect_dominant_cycle_filtered
-    from src.signals.filters import _determine_signal
-    from src.signals.fractals import calculate_hurst
+    from src.signals.filters import generate_signal
 
     df = _load_ohlcv(db_path, symbol, timeframe)
 
@@ -196,31 +194,42 @@ def _render_chart(db_path: str, symbol: str, timeframe: str) -> None:
         st.warning(f"No data for {symbol}/{timeframe}")
         return
 
+    # Fetch HTF
+    conn = duckdb.connect(db_path, read_only=True)
+    try:
+        df_htf = conn.execute(
+            "SELECT * FROM ohlcv WHERE symbol = ? AND timeframe = '1d' ORDER BY timestamp",
+            [symbol],
+        ).fetchdf()
+    finally:
+        conn.close()
+
     # Compute signals
-    cycle_result = detect_dominant_cycle_filtered(df, cutoff=0.1)
-    hurst = calculate_hurst(df)
+    sig_data = generate_signal(df, symbol, timeframe, hurst_threshold=0.6, lowpass_cutoff=0.1, htf_df=df_htf)
 
     signal_data = None
-    if cycle_result:
-        signal = _determine_signal(cycle_result["current_phase"], hurst, 0.6)
-        signal_data = {"signal": signal, "current_phase": cycle_result["current_phase"]}
+    if sig_data:
+        signal_data = {"signal": sig_data["signal"], "current_phase": sig_data["current_phase"]}
+        # Create chart
+        # Wait, create_candlestick_chart might expect cycle_result
+        cycle_result = {"dominant_period": sig_data["dominant_period"], "current_phase": sig_data["current_phase"], "phase_array": sig_data["phase_array"], "projection_array": sig_data["projection_array"]}
+        fig = create_candlestick_chart(df, symbol, timeframe, cycle_result, signal_data)
+        st.plotly_chart(fig, use_container_width=True)
 
-    # Create chart
-    fig = create_candlestick_chart(df, symbol, timeframe, cycle_result, signal_data)
-    st.plotly_chart(fig, use_container_width=True)
-
-    # Metrics row
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("Hurst", f"{hurst:.4f}")
-    with col2:
-        period = cycle_result["dominant_period"] if cycle_result else 0
-        st.metric("Dominant Cycle", f"{period} bars")
-    with col3:
-        sig = signal_data["signal"].upper() if signal_data else "N/A"
-        st.metric("Signal", sig)
-    with col4:
-        st.metric("Last Price", f"${df['close_price'].iloc[-1]:.2f}")
+        # Metrics row
+        col1, col2, col3, col4, col5 = st.columns(5)
+        with col1:
+            st.metric("LTF Hurst", f"{sig_data['hurst_value']:.4f}")
+        with col2:
+            st.metric("HTF Hurst", f"{sig_data['htf_hurst_value']:.4f}" if sig_data.get("htf_hurst_value") else "N/A")
+        with col3:
+            st.metric("Dominant Cycle", f"{sig_data['dominant_period']} bars")
+        with col4:
+            st.metric("Signal", sig_data["signal"].upper())
+        with col5:
+            st.metric("Veto Z-Score", f"{sig_data['atr_zscore']:.2f}")
+    else:
+        st.warning("Failed to generate signals for chart.")
 
 
 def main():
@@ -254,13 +263,50 @@ def main():
     scanner_df = _load_scanner_data(db_path)
     load_time = time.perf_counter() - start
 
-    # Scanner table
-    selection = _render_scanner(scanner_df)
+    # --- Tabs ---
+    tab_scanner, tab_paper = st.tabs(["Scanner", "Paper Trading"])
 
-    if selection:
-        symbol, timeframe = selection
+    with tab_scanner:
+        # --- Sidebar Filters ---
+        st.sidebar.header("Filters")
+        
+        # Hurst Filter
+        min_hurst = st.sidebar.slider("Min Hurst", 0.5, 1.0, 0.6, 0.05)
+        
+        # Direction Filter
+        directions = st.sidebar.multiselect(
+            "Signal Direction", ["LONG", "SHORT", "NEUTRAL"], ["LONG", "SHORT"]
+        )
+        
+        # Timeframe Filter
+        all_tfs = scanner_df["Timeframe"].unique().tolist() if not scanner_df.empty else []
+        selected_tfs = st.sidebar.multiselect("Timeframes", all_tfs, all_tfs)
+
+        # Apply Filters
+        if not scanner_df.empty:
+            filtered_df = scanner_df[
+                (scanner_df["LTF Hurst"] >= min_hurst) &
+                (scanner_df["Signal"].isin(directions)) &
+                (scanner_df["Timeframe"].isin(selected_tfs))
+            ]
+        else:
+            filtered_df = scanner_df
+
+        # --- Heatmap View ---
+        if not scanner_df.empty:
+            _render_heatmap(scanner_df, selected_tfs)
+
+        # --- Detailed Scanner ---
         st.divider()
-        _render_chart(db_path, symbol, timeframe)
+        selection = _render_scanner(filtered_df)
+
+        if selection:
+            symbol, timeframe = selection
+            st.divider()
+            _render_chart(db_path, symbol, timeframe)
+
+    with tab_paper:
+        _render_paper_trading(db_path)
 
     # Footer with refresh button
     col_foot1, col_foot2 = st.columns([4, 1])
@@ -270,6 +316,207 @@ def main():
         if st.button("Refresh Now"):
             _refresh_scanner_data()
             st.rerun()
+
+    # Auto-refresh loop (Story 4.4)
+    # Note: Page will show 'running' spinner while waiting for next refresh
+    time.sleep(60)
+    st.rerun()
+
+
+def _render_paper_trading(db_path: str) -> None:
+    """Render Paper Trading dashboard tab."""
+    import duckdb
+    from src.config import load_config
+    from src.data_loader import get_connection, reset_portfolio
+    
+    settings, _, _, _ = load_config()
+    
+    st.header("Live Paper Trading Portfolio")
+    
+    # Connect
+    conn = get_connection(settings, read_only=True)
+    
+    try:
+        # Fetch Balance
+        if settings.use_postgres:
+            balance_df = pd.read_sql("SELECT * FROM portfolio_state", conn)
+            trades_df = pd.read_sql("SELECT * FROM paper_trades ORDER BY entry_time DESC", conn)
+        else:
+            balance_df = conn.execute("SELECT * FROM portfolio_state").fetchdf()
+            trades_df = conn.execute("SELECT * FROM paper_trades ORDER BY entry_time DESC").fetchdf()
+            
+        if balance_df.empty:
+            st.warning("Portfolio not initialized.")
+            return
+
+        current_bal = balance_df["current_balance"].iloc[0]
+        init_bal = balance_df["initial_balance"].iloc[0]
+        
+        # Calculate Trade Metrics
+        if not trades_df.empty:
+            trades_df["Amount"] = trades_df["entry_price"] * trades_df["quantity"]
+        
+        # Active Stats & Live Prices
+        active = trades_df[trades_df["status"] == "OPEN"].copy()
+        invested_market_value = 0.0
+        
+        if not active.empty:
+            current_prices = {}
+            for symbol in active["symbol"].unique():
+                # Fetch latest price (using same TF logic as scheduler)
+                p_df = pd.read_sql(f"SELECT close_price FROM ohlcv WHERE symbol = '{symbol}' ORDER BY timestamp DESC LIMIT 1", conn)
+                if not p_df.empty:
+                    current_prices[symbol] = float(p_df["close_price"].iloc[0])
+            
+            active["Current Price"] = active["symbol"].map(current_prices)
+            
+            def calc_unrealized(row):
+                if pd.isna(row["Current Price"]): return 0.0
+                if row["side"] == "LONG":
+                    return (row["Current Price"] - row["entry_price"]) * row["quantity"]
+                else:
+                    return (row["entry_price"] - row["Current Price"]) * row["quantity"]
+            
+            active["PnL"] = active.apply(calc_unrealized, axis=1)
+            invested_market_value = (active["quantity"] * active["Current Price"]).sum()
+
+        total_equity = current_bal + invested_market_value
+        total_pnl = total_equity - init_bal
+        pnl_pct = (total_pnl / init_bal) * 100
+        
+        # Metrics
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Total Equity", f"${total_equity:,.2f}", f"{pnl_pct:.2f}%")
+        m2.metric("Available Cash", f"${current_bal:,.2f}")
+        m3.metric("Position Value", f"${invested_market_value:,.2f}")
+        
+        # Active Positions
+        st.subheader("Active Positions")
+        if not active.empty:
+            def style_pnl(val):
+                color = "#26a69a" if val >= 0 else "#ef5350"
+                return f"color: {color}; font-weight: bold"
+            
+            # Make sure we select the new columns if they exist
+            cols_to_show = ["symbol", "side", "entry_price", "Current Price", "PnL", "tp", "sl", "ltf_hurst", "htf_hurst", "veto_z", "status", "entry_time"]
+            existing_cols = [c for c in cols_to_show if c in active.columns]
+            styled_active = active[existing_cols].style.map(style_pnl, subset=["PnL"])
+            st.dataframe(styled_active, use_container_width=True)
+        else:
+            st.info("No active positions.")
+            
+        # Closed History
+        st.subheader("Trade History")
+        closed = trades_df[trades_df["status"] == "CLOSED"]
+        if not closed.empty:
+            cols_to_show_closed = ["symbol", "side", "entry_price", "exit_price", "pnl", "ltf_hurst", "htf_hurst", "veto_z", "entry_time", "exit_time"]
+            existing_cols_closed = [c for c in cols_to_show_closed if c in closed.columns]
+            st.dataframe(closed[existing_cols_closed], use_container_width=True)
+            
+        # Reset Button
+        st.divider()
+        if st.button("Reset Portfolio (Clear Data)", type="primary"):
+            # Need write connection
+            conn.close()
+            w_conn = get_connection(settings, read_only=False)
+            reset_portfolio(w_conn)
+            w_conn.close()
+            st.success("Portfolio reset! Refreshing...")
+            time.sleep(1)
+            st.rerun()
+            
+    except Exception as e:
+        st.error(f"Error loading portfolio: {e}")
+    finally:
+        try:
+            conn.close()
+        except:
+            pass
+
+
+def _render_heatmap(df: pd.DataFrame, selected_tfs: list[str]) -> None:
+    """Render a multi-timeframe confluence heatmap."""
+    st.subheader("Confluence Heatmap")
+    
+    if df.empty:
+        st.info("No data for heatmap.")
+        return
+
+    # Pivot: Index=Symbol, Columns=Timeframe, Values=Signal
+    # We filter only by selected timeframes for the columns
+    df_filtered = df[df["Timeframe"].isin(selected_tfs)]
+    
+    if df_filtered.empty:
+        st.info("No data matches the timeframe filter.")
+        return
+
+    heatmap = df_filtered.pivot(index="Symbol", columns="Timeframe", values="Signal")
+    
+    # Sort columns chronologically
+    TIMEFRAME_ORDER = ["15m", "1h", "4h", "1d"]
+    
+    # Get available columns that are also in our known order
+    sorted_cols = [tf for tf in TIMEFRAME_ORDER if tf in heatmap.columns]
+    
+    # Append any unknown timeframes at the end (just in case)
+    remaining_cols = [c for c in heatmap.columns if c not in sorted_cols]
+    
+    heatmap = heatmap[sorted_cols + remaining_cols]
+    
+    # --- Action & Score Calculation ---
+    weights = {'1d': 3.0, '4h': 2.0, '1h': 1.0, '15m': 0.5}
+    
+    def calculate_action(row):
+        score = 0.0
+        for tf, weight in weights.items():
+            if tf in row:
+                val = row[tf]
+                if val == "LONG":
+                    score += weight
+                elif val == "SHORT":
+                    score -= weight
+        
+        if score >= 4.0: return "STRONG BUY", score
+        if score >= 2.0: return "BUY", score
+        if score <= -4.0: return "STRONG SELL", score
+        if score <= -2.0: return "SELL", score
+        return "WAIT", score
+
+    # Apply calculation
+    results = heatmap.apply(calculate_action, axis=1)
+    heatmap.insert(0, "Action", results.apply(lambda x: x[0]))
+    heatmap["Score"] = results.apply(lambda x: x[1])
+    
+    # Sort by Score Descending
+    heatmap = heatmap.sort_values("Score", ascending=False)
+
+    # Styling
+    def color_signals(val):
+        if val == "LONG":
+            return "background-color: #26a69a; color: white; font-weight: bold"
+        elif val == "SHORT":
+            return "background-color: #ef5350; color: white; font-weight: bold"
+        elif val == "NEUTRAL":
+            return "color: gray"
+        
+        # Action Styling
+        if val == "STRONG BUY":
+            return "background-color: #00695c; color: white; font-weight: bold" # Dark Green
+        if val == "BUY":
+            return "background-color: #26a69a; color: white; font-weight: bold"
+        if val == "STRONG SELL":
+            return "background-color: #b71c1c; color: white; font-weight: bold" # Dark Red
+        if val == "SELL":
+            return "background-color: #ef5350; color: white; font-weight: bold"
+        if val == "WAIT":
+            return "color: gray; font-style: italic"
+            
+        return ""
+
+    st.dataframe(
+        heatmap.style.map(color_signals),
+        use_container_width=True
+    )
 
 
 if __name__ == "__main__":

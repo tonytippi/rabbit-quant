@@ -12,7 +12,7 @@ import duckdb
 from loguru import logger
 
 from src.config import AssetConfig, TimeframeConfig
-from src.data_loader import upsert_ohlcv
+from src.data_loader import upsert_ohlcv, get_latest_timestamp, DBConnection
 from src.fetchers.crypto_fetcher import fetch_crypto_ohlcv
 from src.fetchers.stock_fetcher import fetch_stock_ohlcv
 
@@ -36,15 +36,16 @@ async def _fetch_stock_task(
     symbol: str,
     timeframe: str,
     yf_interval: str,
-    conn: duckdb.DuckDBPyConnection,
+    conn: DBConnection,
     result: FetchResult,
     semaphore: asyncio.Semaphore,
+    latest_timestamp=None,
 ) -> None:
     """Async wrapper for stock fetching (yfinance is sync, run in executor)."""
     async with semaphore:
         try:
             loop = asyncio.get_event_loop()
-            df = await loop.run_in_executor(None, fetch_stock_ohlcv, symbol, timeframe, yf_interval)
+            df = await loop.run_in_executor(None, fetch_stock_ohlcv, symbol, timeframe, yf_interval, latest_timestamp)
             if df is not None and not df.empty:
                 rows = upsert_ohlcv(conn, df)
                 result.rows_upserted += rows
@@ -63,14 +64,15 @@ async def _fetch_crypto_task(
     timeframe: str,
     ccxt_interval: str,
     exchange_id: str,
-    conn: duckdb.DuckDBPyConnection,
+    conn: DBConnection,
     result: FetchResult,
     semaphore: asyncio.Semaphore,
+    latest_timestamp=None,
 ) -> None:
     """Async task for crypto fetching."""
     async with semaphore:
         try:
-            df = await fetch_crypto_ohlcv(symbol, timeframe, ccxt_interval, exchange_id)
+            df = await fetch_crypto_ohlcv(symbol, timeframe, ccxt_interval, exchange_id, latest_timestamp)
             if df is not None and not df.empty:
                 rows = upsert_ohlcv(conn, df)
                 result.rows_upserted += rows
@@ -85,7 +87,7 @@ async def _fetch_crypto_task(
 
 
 async def fetch_all_assets(
-    conn: duckdb.DuckDBPyConnection,
+    conn: DBConnection,
     assets: AssetConfig,
     timeframes: TimeframeConfig,
 ) -> FetchResult:
@@ -108,15 +110,17 @@ async def fetch_all_assets(
     # Build stock fetch tasks
     for symbol in assets.stock_symbols:
         for tf in timeframes.default_timeframes:
+            latest_ts = get_latest_timestamp(conn, symbol, tf)
             yf_interval = timeframes.yfinance_mapping.get(tf, tf)
-            tasks.append(_fetch_stock_task(symbol, tf, yf_interval, conn, result, semaphore))
+            tasks.append(_fetch_stock_task(symbol, tf, yf_interval, conn, result, semaphore, latest_ts))
             result.total += 1
 
     # Build crypto fetch tasks
     for symbol in assets.crypto_symbols:
         for tf in timeframes.default_timeframes:
+            latest_ts = get_latest_timestamp(conn, symbol, tf)
             ccxt_interval = timeframes.ccxt_mapping.get(tf, tf)
-            tasks.append(_fetch_crypto_task(symbol, tf, ccxt_interval, assets.crypto_exchange, conn, result, semaphore))
+            tasks.append(_fetch_crypto_task(symbol, tf, ccxt_interval, assets.crypto_exchange, conn, result, semaphore, latest_ts))
             result.total += 1
 
     logger.info(f"Starting fetch for {result.total} symbol/timeframe combinations...")

@@ -19,21 +19,26 @@ TIMEFRAME_PERIOD_MAP = {
 }
 
 
-def fetch_stock_ohlcv(symbol: str, timeframe: str, yf_interval: str) -> pd.DataFrame | None:
+def fetch_stock_ohlcv(symbol: str, timeframe: str, yf_interval: str, latest_timestamp=None) -> pd.DataFrame | None:
     """Fetch OHLCV data for a single stock symbol and timeframe.
 
     Args:
         symbol: Stock ticker (e.g., "AAPL").
         timeframe: Internal timeframe name (e.g., "1h", "4h").
         yf_interval: yfinance interval string from timeframe mapping.
+        latest_timestamp: Optional pd.Timestamp of the most recent candle.
 
     Returns:
         Standardized DataFrame with OHLCV_COLUMNS, or None on failure.
     """
     try:
-        period = TIMEFRAME_PERIOD_MAP.get(timeframe, "730d")
         ticker = yf.Ticker(symbol)
-        df = ticker.history(period=period, interval=yf_interval)
+        if latest_timestamp is not None:
+            start_date = latest_timestamp.strftime("%Y-%m-%d")
+            df = ticker.history(start=start_date, interval=yf_interval)
+        else:
+            period = TIMEFRAME_PERIOD_MAP.get(timeframe, "730d")
+            df = ticker.history(period=period, interval=yf_interval)
 
         if df is None or df.empty:
             logger.warning(f"No data returned for {symbol}/{timeframe}")

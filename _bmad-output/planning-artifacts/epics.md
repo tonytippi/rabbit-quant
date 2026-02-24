@@ -39,5 +39,10 @@ Users can validate trading hypotheses by backtesting cycle+Hurst strategies with
 
 ### [Epic 4: Interactive Trading Dashboard](stories/epic-04-dashboard.md)
 Users can visually monitor markets in real-time, scan for opportunities by Hurst ranking, and see buy/sell signals on interactive charts with cycle overlays.
-- **Stories:** 4.1 - 4.7
+- **Stories:** 4.1 - 4.9
 - **Status:** COMPLETE ✅
+
+### [Epic 5: Live Paper Trading System](stories/epic-05-paper-trading.md)
+Users can test strategies in real-time with a simulated portfolio, tracking PnL without risking real capital.
+- **Stories:** 5.1 - 5.5
+- **Status:** PENDING ⏳

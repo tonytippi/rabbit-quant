@@ -22,9 +22,16 @@ cp .env.example .env
 
 ### Environment Variables (`.env`)
 
+Rabbit-Quant supports both local DuckDB and PostgreSQL. **PostgreSQL is required for concurrent workflows** (running scheduler and dashboard at the same time).
+
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DUCKDB_PATH` | `data/rabbit.duckdb` | Database file location |
+| `DUCKDB_PATH` | `data/rabbit.duckdb` | Local database file (fallback) |
+| `DATABASE_HOST` | `localhost` | Postgres Host |
+| `DATABASE_PORT` | `5432` | Postgres Port |
+| `DATABASE_NAME` | `rabbit_quant` | Postgres DB Name |
+| `DATABASE_USER` | - | Postgres Username |
+| `DATABASE_PASSWORD` | - | Postgres Password |
 | `LOG_LEVEL` | `INFO` | Logging level (DEBUG/INFO/WARNING/ERROR) |
 | `LOG_PATH` | `logs/rabbit.log` | Log file path |
 | `YFINANCE_PROXY` | _(empty)_ | HTTP proxy for yfinance requests |
@@ -73,101 +80,50 @@ Supported: `1m`, `5m`, `15m`, `1h`, `4h`, `1d`. Note: yfinance does not support 
 
 ---
 
-## Quick Start
+## Workflow Guide
 
-### 1. Fetch Market Data
+### Path A: Research & Strategy Optimization (One-time)
 
-```bash
-uv run python main.py fetch
-```
+Use this workflow to find the best performing assets and fine-tune your strategy parameters.
 
-Downloads OHLCV data for all configured symbols across all timeframes. Data is stored in DuckDB with upsert semantics (safe to re-run).
-
-**Output example:**
-```
-Fetch Summary: 18/20 succeeded, 45000 rows upserted in 12.3s
-Failed: 2 symbol/timeframe combinations
-```
-
-### 2. Run a Single Backtest
-
-```bash
-uv run python main.py backtest -s AAPL -t 1d
-```
-
-Runs the cycle+Hurst strategy on AAPL daily data using parameters from `config/strategy.toml`.
-
-**Output example:**
-```
-Backtest Results for AAPL/1d:
-  Total Return: 23.45%
-  Sharpe Ratio: 1.2340
-  Max Drawdown: -8.76%
-  Win Rate:     62.5%
-  Total Trades: 24
-```
-
-Trade log exported to `data/backtest/trades_AAPL_1d.csv`.
-
-### 3. Run Parameter Sweep
-
-```bash
-uv run python main.py backtest -s AAPL -t 1d --sweep
-```
-
-Tests all combinations from `config/strategy.toml` sweep ranges and ranks by Sharpe Ratio.
-
-**Output example:**
-```
-Parameter Sweep Results (225 combinations):
-Top 3 by Sharpe Ratio:
-  #1: Hurst≥0.65, PhaseLong=4.712, PhaseShort=1.571 | Sharpe=1.5432 ← RECOMMENDED
-  #2: Hurst≥0.60, PhaseLong=4.400, PhaseShort=1.571 | Sharpe=1.3210
-  #3: Hurst≥0.70, PhaseLong=5.000, PhaseShort=1.300 | Sharpe=1.1890
-```
-
-Full results saved to `data/backtest/sweep_AAPL_1d.csv`.
-
-### 4. Bulk Backtesting & Market Scanning
-
+**1. Optimize Entire Market:**
+Fetch fresh data and find the best parameters for every asset in your watchlist.
 ```bash
 uv run python main.py backtest-all --type crypto --sweep --fetch
 ```
 
-Optimizes the strategy for **every** symbol in your watchlist across **all** timeframes in a single run. The `--fetch` flag ensures all data is fresh before starting.
+**2. Analyze Results:**
+Check the leaderboard in the console and open `data/backtest/summary_bulk_crypto.csv` to see which symbols/timeframes have the highest Sharpe Ratio.
 
-**Output example:**
+**3. Deep Dive:**
+Run a detailed sweep for a single promising asset:
+```bash
+uv run python main.py backtest -s SOL/USDT -t 1h --sweep
 ```
-Bulk run complete in 86.1s. Processed 48 combinations.
+*(Optionally apply recommendations to `config/strategy.toml` when prompted).*
 
-=== LEADERBOARD (Top 10) ===
-    symbol timeframe  sharpe_ratio  total_return  max_drawdown  best_hurst_threshold
- AVAX/USDT        1d      1.970207   4204.827466     49.719854                   0.5
-  SOL/USDT        1h      1.779964    104.330773      9.085976                   0.5
- ...
+### Path B: Continuous Live Monitoring (Server Mode)
+
+Use this workflow to keep your data fresh, calculate signals in the background, and receive real-time alerts. **Requires PostgreSQL.**
+
+**1. Start the Writer Service (Terminal 1):**
+This service runs continuously, fetching data and scanning for signals every X minutes. It also sends Telegram alerts if configured.
+```bash
+uv run python main.py run-scheduler --interval 5
 ```
 
-Consolidated results are saved to `data/backtest/summary_bulk_crypto.csv`.
-
-### 5. Launch Dashboard
-
+**2. Launch the Dashboard (Terminal 2):**
+Monitor the market visually. The dashboard will automatically reflect updates from the Writer Service.
 ```bash
 uv run python main.py dashboard
 ```
-
-Opens browser at `http://localhost:8501` with:
-- **Scanner table** — all assets sorted by Hurst exponent
-- **Candlestick chart** — interactive with zoom/pan/crosshair
-- **Sine wave overlay** — historical fit + forward projection (dashed)
-- **Signal markers** — green triangles (long) / red triangles (short)
-- **Auto-refresh** — every 60 seconds
 
 ---
 
 ## Running Tests
 
 ```bash
-# Run all 140 tests
+# Run all tests
 uv run pytest
 
 # With coverage report
@@ -175,10 +131,6 @@ uv run pytest --cov=src --cov-report=term-missing
 
 # Run specific module tests
 uv run pytest tests/test_cycles.py -v
-uv run pytest tests/test_vbt_runner.py -v
-
-# Run only fast tests (exclude slow backtest sweep)
-uv run pytest -k "not sweep_with_defaults"
 ```
 
 ## Linting
@@ -199,19 +151,13 @@ uv run ruff check --fix src/ tests/
 
 **Hurst Threshold (`hurst.threshold`)**
 - Controls signal sensitivity. Higher = fewer but more confident signals.
-- `0.5-0.6`: Many signals, lower confidence (random-walk-like markets still trigger)
+- `0.5-0.6`: Many signals, lower confidence
 - `0.6-0.7`: Balanced — recommended starting point
 - `0.7-0.9`: Fewer signals, only strong trends
 
 **Cycle Phase Centers (radians)**
 - `phase_long_center` (~4.712 = 3π/2): Where long entries trigger (cycle trough)
 - `phase_short_center` (~1.571 = π/2): Where short entries trigger (cycle peak)
-- Adjusting these shifts the entry timing relative to the cycle
-
-**Low-pass Cutoff (`cycle.lowpass_cutoff`)**
-- Controls noise filtering before cycle detection
-- Lower = more smoothing (0.05: heavy smoothing, 0.2: light smoothing)
-- Default 0.1 is good for most cases
 
 ### Optimization Workflow
 
@@ -222,68 +168,14 @@ uv run python main.py fetch
 
 **Step 2: Run sweep on your target asset**
 ```bash
-uv run python main.py backtest -s AAPL -t 1d --sweep
+uv run python main.py backtest -s SOL/USDT -t 1h --sweep
 ```
 
 **Step 3: Analyze results**
-
-Open `data/backtest/sweep_AAPL_1d.csv` to see all 225 combinations with:
-- `hurst_threshold`, `phase_long`, `phase_short`
-- `total_return`, `sharpe_ratio`, `max_drawdown`, `win_rate`, `total_trades`
+Open `data/backtest/sweep_SOLUSDT_1h.csv` to see all 225 combinations.
 
 **Step 4: Apply recommended parameters**
-
-Update `config/strategy.toml` with the top-ranked values:
-```toml
-[hurst]
-threshold = 0.65  # from sweep recommendation
-
-[backtest]
-# Narrow ranges around optimal for fine-tuning
-hurst_range = [0.60, 0.62, 0.65, 0.67, 0.70]
-phase_long_range = [4.5, 4.6, 4.712, 4.8, 4.9]
-phase_short_range = [1.4, 1.5, 1.571, 1.6, 1.7]
-```
-
-**Step 5: Fine-tune with narrower sweep**
-```bash
-uv run python main.py backtest -s AAPL -t 1d --sweep
-```
-
-**Step 6: Verify on different timeframes**
-```bash
-uv run python main.py backtest -s AAPL -t 1h --sweep
-uv run python main.py backtest -s AAPL -t 4h --sweep
-```
-
-### Tips
-
-- **Avoid overfitting**: If optimal parameters only work on one asset/timeframe, they're likely overfit. Test across multiple assets.
-- **Sharpe > 1.0**: Generally considered good risk-adjusted performance.
-- **Max Drawdown**: Keep below 20% for sustainable strategies.
-- **Total Trades**: Too few (<10) means insufficient statistical significance.
-- **Walk-forward**: Split data into in-sample (optimize) and out-of-sample (validate) periods manually by adjusting the fetch date range.
-
-### 6. Server Deployment (Writer Service)
-
-For server deployments where multiple components (Dashboard, Backtester) need concurrent access, use the **Writer Service** to avoid DuckDB locking conflicts.
-
-**Features:**
-*   **Automatic Data Ingestion:** Fetches new market data every X minutes.
-*   **Headless Signal Scanning:** Calculates signals immediately after fetching.
-*   **Telegram Alerts:** Sends instant notifications for BUY/SELL signals if configured in `.env`.
-
-**Step 1: Start the Ingestion Service (The Writer)**
-This process owns the write lock and updates data periodically.
-```bash
-uv run python main.py run-scheduler --interval 5
-```
-
-**Step 2: Start the Dashboard (The Reader)**
-The dashboard connects in read-only mode and will see updates from the Writer Service.
-```bash
-uv run python main.py dashboard
-```
+Update `config/strategy.toml` with the top-ranked values.
 
 ---
 
@@ -291,29 +183,50 @@ uv run python main.py dashboard
 
 ```
 rabbit-quant/
-├── main.py                          # CLI: fetch, backtest, dashboard
+├── main.py                          # CLI: fetch, backtest, dashboard, run-scheduler
 ├── config/
 │   ├── assets.toml                  # Stock & crypto watchlists
 │   ├── strategy.toml                # Hurst/cycle/backtest parameters
-│   └── timeframes.toml              # Timeframe mappings
+│   └── timeframes.toml              # Timeframe definitions
 ├── src/
 │   ├── config.py                    # Pydantic Settings + TOML loading
-│   ├── data_loader.py               # DuckDB schema, upsert, query
-│   ├── fetchers/
-│   │   ├── stock_fetcher.py         # yfinance OHLCV fetching
-│   │   ├── crypto_fetcher.py        # ccxt async crypto fetching
-│   │   └── orchestrator.py          # Concurrent ingestion coordinator
-│   ├── signals/
-│   │   ├── cycles.py                # FFT cycle detection + low-pass filter
-│   │   ├── fractals.py              # Numba Hurst R/S exponent
-│   │   └── filters.py               # Combined signal generation
-│   ├── backtest/
-│   │   ├── vbt_runner.py            # VectorBT engine + parameter sweep
-│   │   └── analyzer.py              # Metrics, CSV export, auto-discovery
-│   └── dashboard/
-│       ├── app.py                   # Streamlit scanner + routing
-│       └── charts.py                # Plotly candlestick + overlays
-├── tests/                           # 140 tests (13 files)
-├── data/                            # DuckDB database + backtest outputs
-└── logs/                            # Loguru rotating log files
+│   ├── data_loader.py               # DuckDB/Postgres schema & operations
+│   ├── services/
+│   │   ├── scheduler.py             # Background ingestion service
+│   │   └── notifier.py              # Telegram notification service
+│   ├── fetchers/                    # market data APIs
+│   ├── signals/                     # Math Core (FFT, Hurst)
+│   ├── backtest/                    # VectorBT Engine
+│   └── dashboard/                   # Streamlit UI
+├── tests/                           # pytest suite
+└── data/                            # Local DB & reports
 ```
+
+---
+
+## Production Runbook
+
+To run Rabbit-Quant as a full trading workstation:
+
+**1. Prerequisites**
+- PostgreSQL database running
+- `.env` file configured with DB credentials and Telegram tokens
+
+**2. Start the Backend (Writer Service)**
+Open Terminal 1:
+```bash
+uv run python main.py run-scheduler --interval 5
+```
+*   Fetches data every 5 minutes
+*   Scans for signals
+*   Sends Telegram alerts
+*   Logs to `logs/trading_signals.log`
+
+**3. Start the Frontend (Dashboard)**
+Open Terminal 2:
+```bash
+uv run python main.py dashboard
+```
+*   Visualizes market data
+*   Shows Confluence Heatmap
+*   Auto-refreshes every 60s without locking the database

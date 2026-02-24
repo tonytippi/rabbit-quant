@@ -5,6 +5,7 @@ from src.config import (
     AssetConfig,
     StrategyConfig,
     TimeframeConfig,
+    PaperConfig,
     _load_toml,
     load_config,
     setup_logging,
@@ -44,8 +45,8 @@ class TestLoadToml:
 class TestAssetConfig:
     def test_stock_symbols_loaded(self):
         config = AssetConfig()
-        assert len(config.stock_symbols) > 0
-        assert "AAPL" in config.stock_symbols
+        # symbols can be empty in default config
+        assert isinstance(config.stock_symbols, list)
 
     def test_crypto_symbols_loaded(self):
         config = AssetConfig()
@@ -59,7 +60,6 @@ class TestAssetConfig:
     def test_all_symbols_combines_both(self):
         config = AssetConfig()
         all_syms = config.all_symbols
-        assert "AAPL" in all_syms
         assert "BTC/USDT" in all_syms
         assert len(all_syms) == len(config.stock_symbols) + len(config.crypto_symbols)
 
@@ -85,9 +85,9 @@ class TestStrategyConfig:
 class TestTimeframeConfig:
     def test_default_timeframes_loaded(self):
         config = TimeframeConfig()
-        assert "1m" in config.default_timeframes
+        assert "15m" in config.default_timeframes
         assert "1d" in config.default_timeframes
-        assert len(config.default_timeframes) == 6
+        assert len(config.default_timeframes) == 4
 
     def test_yfinance_mapping_loaded(self):
         config = TimeframeConfig()
@@ -108,8 +108,9 @@ class TestSetupLogging:
 
 class TestLoadConfig:
     def test_load_config_returns_all_configs(self):
-        settings, assets, strategy, timeframes = load_config()
+        settings, assets, strategy, timeframes, paper = load_config()
         assert isinstance(settings, AppSettings)
         assert isinstance(assets, AssetConfig)
         assert isinstance(strategy, StrategyConfig)
         assert isinstance(timeframes, TimeframeConfig)
+        assert isinstance(paper, PaperConfig)

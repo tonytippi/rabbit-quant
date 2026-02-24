@@ -161,3 +161,46 @@ So that I can act on opportunities while away from my computer.
 **Given** the Telegram API is unreachable
 **When** sending fails
 **Then** the error is logged, but the scheduler continues running without crashing
+
+### Story 4.8: Confluence Heatmap & Advanced Filtering
+
+As a **quant trader**,
+I want a dashboard view that aggregates signals across multiple timeframes and offers advanced filtering,
+So that I can quickly identify high-probability "A+" setups where multiple timeframes align.
+
+**Acceptance Criteria:**
+
+**Given** the dashboard is loaded
+**When** I view the "Confluence Heatmap" tab
+**Then** I see a matrix where Rows=Symbols and Cols=Timeframes
+**And** cells are colored by signal direction (Green=Long, Red=Short, Gray=Neutral)
+**And** rows are sorted by a "Confluence Score" (percentage of timeframes agreeing)
+
+**Given** the sidebar filter controls
+**When** I adjust the "Minimum Hurst" slider or toggle "Show Longs Only"
+**Then** the heatmap and scanner table instantly update to show only matching assets
+
+**Given** a symbol with conflicting signals (e.g., Long on 1h, Short on 1d)
+**When** displayed in the heatmap
+**Then** the visual conflict is obvious, and its Confluence Score reflects the mixed signal (e.g., 50%)
+
+### Story 4.9: Dynamic Risk Management (TP/SL)
+
+As a **disciplined trader**,
+I want the system to suggest Take Profit (TP) and Stop Loss (SL) levels for every signal based on volatility (ATR),
+So that I can manage risk effectively without manual calculation.
+
+**Acceptance Criteria:**
+
+**Given** a signal is detected (Long or Short)
+**When** the system generates the signal report
+**Then** it calculates the Average True Range (ATR, length 14) for that timeframe
+
+**Given** an ATR value
+**When** determining risk levels
+**Then** Stop Loss (SL) is set at `Price +/- (1.5 * ATR)`
+**And** Take Profit (TP) is set at `Price +/- (Cycle Amplitude)` or `(2.0 * ATR)` (whichever is larger)
+
+**Given** the Dashboard and Telegram Alerts
+**When** a signal is displayed or sent
+**Then** the TP and SL prices are explicitly listed

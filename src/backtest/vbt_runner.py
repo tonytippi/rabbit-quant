@@ -2,6 +2,8 @@
 
 Story 3.1 — Configurable long/short signal logic based on cycle phase + Hurst.
 Story 3.2 — Multi-dimensional parameter sweep engine using vectorized operations.
+Phase 3 — Multi-Asset Portfolio Backtesting & Diversification (Time-First Numba).
+Phase 3.5 — Cross-Sectional Ranking for Multi-Asset Capital Allocation.
 
 Architecture boundary: reads signal output (dicts of numpy arrays),
 orchestrates VectorBT. Does NOT own data fetching or signal computation.
@@ -11,115 +13,301 @@ import numpy as np
 import pandas as pd
 import vectorbt as vbt
 from loguru import logger
+import numba
+
+
+@numba.njit(cache=True)
+def simulate_portfolio_nb(
+    close: np.ndarray,
+    high: np.ndarray,
+    low: np.ndarray,
+    atr: np.ndarray,
+    phase_array: np.ndarray,
+    ltf_metric: np.ndarray,
+    htf_metric: np.ndarray,
+    volatility_zscore: np.ndarray,
+    htf_direction: np.ndarray,
+    rank_metric: np.ndarray,
+    htf_threshold: float,
+    ltf_threshold: float,
+    veto_threshold: float,
+    trailing_multiplier: float,
+    breakeven_threshold: float,
+    phase_long_center: float,
+    phase_short_center: float,
+    phase_tolerance: float,
+    max_concurrent_trades: int,
+) -> tuple:
+    """Numba-compiled Time-First loop for Portfolio Execution and Signal Ranking."""
+    n_time, n_assets = close.shape
+    
+    long_entries = np.zeros((n_time, n_assets), dtype=np.bool_)
+    long_exits = np.zeros((n_time, n_assets), dtype=np.bool_)
+    short_entries = np.zeros((n_time, n_assets), dtype=np.bool_)
+    short_exits = np.zeros((n_time, n_assets), dtype=np.bool_)
+    
+    in_position_long = np.zeros(n_assets, dtype=np.bool_)
+    in_position_short = np.zeros(n_assets, dtype=np.bool_)
+    entry_price = np.zeros(n_assets, dtype=np.float64)
+    highest_price = np.zeros(n_assets, dtype=np.float64)
+    lowest_price = np.zeros(n_assets, dtype=np.float64)
+    stop_loss = np.zeros(n_assets, dtype=np.float64)
+    is_breakeven = np.zeros(n_assets, dtype=np.bool_)
+    
+    open_trades_count = 0
+    
+    for i in range(1, n_time):
+        # 1. Process EXITS first to free up concurrency budget
+        for a in range(n_assets):
+            if in_position_long[a]:
+                if high[i, a] > highest_price[a]:
+                    highest_price[a] = high[i, a]
+                
+                # Dynamic ATR Trailing (Truly dynamic - uses current ATR)
+                current_trailing = highest_price[a] - (atr[i, a] * trailing_multiplier)
+                if current_trailing > stop_loss[a]:
+                    stop_loss[a] = current_trailing
+                
+                # Breakeven Ratchet
+                if not is_breakeven[a]:
+                    if high[i, a] >= entry_price[a] + (atr[i, a] * breakeven_threshold):
+                        # Move stop to entry + 0.2% fee coverage
+                        be_level = entry_price[a] * 1.002
+                        if be_level > stop_loss[a]:
+                            stop_loss[a] = be_level
+                            is_breakeven[a] = True
+                            
+                # Check Exit
+                if close[i, a] <= stop_loss[a]:
+                    long_exits[i, a] = True
+                    in_position_long[a] = False
+                    open_trades_count -= 1
+
+            elif in_position_short[a]:
+                if low[i, a] < lowest_price[a]:
+                    lowest_price[a] = low[i, a]
+                
+                # Dynamic ATR Trailing
+                current_trailing = lowest_price[a] + (atr[i, a] * trailing_multiplier)
+                if current_trailing < stop_loss[a]:
+                    stop_loss[a] = current_trailing
+                    
+                # Breakeven Ratchet
+                if not is_breakeven[a]:
+                    if low[i, a] <= entry_price[a] - (atr[i, a] * breakeven_threshold):
+                        be_level = entry_price[a] * 0.998
+                        if be_level < stop_loss[a]:
+                            stop_loss[a] = be_level
+                            is_breakeven[a] = True
+                            
+                # Check Exit
+                if close[i, a] >= stop_loss[a]:
+                    short_exits[i, a] = True
+                    in_position_short[a] = False
+                    open_trades_count -= 1
+        
+        # 2. Process ENTRIES
+        if open_trades_count < max_concurrent_trades:
+            # Rank candidates by Volatility-Adjusted Momentum
+            scores = np.full(n_assets, -1e10, dtype=np.float64)
+            dirs = np.zeros(n_assets, dtype=np.int8) # 1=Long, -1=Short
+            
+            for a in range(n_assets):
+                if in_position_long[a] or in_position_short[a]:
+                    continue
+                    
+                phase = phase_array[i, a] % (2.0 * np.pi)
+                valid = (htf_metric[i, a] < htf_threshold) and (ltf_metric[i, a] > ltf_threshold) and (volatility_zscore[i, a] < veto_threshold)
+                if not valid:
+                    continue
+                    
+                prev_phase = phase_array[i-1, a] % (2.0 * np.pi)
+                
+                if htf_direction[i, a] >= 0:
+                    if abs(phase - phase_long_center) < phase_tolerance and not (abs(prev_phase - phase_long_center) < phase_tolerance):
+                        scores[a] = rank_metric[i, a]
+                        dirs[a] = 1
+                elif htf_direction[i, a] <= 0:
+                    if abs(phase - phase_short_center) < phase_tolerance and not (abs(prev_phase - phase_short_center) < phase_tolerance):
+                        scores[a] = rank_metric[i, a]
+                        dirs[a] = -1
+            
+            # Sort by Momentum Score descending
+            sorted_indices = np.argsort(scores)[::-1]
+            
+            for a in sorted_indices:
+                if scores[a] <= -1e9 or open_trades_count >= max_concurrent_trades:
+                    break
+                
+                entry_price[a] = close[i, a]
+                highest_price[a] = high[i, a]
+                lowest_price[a] = low[i, a]
+                is_breakeven[a] = False
+                
+                if dirs[a] == 1:
+                    long_entries[i, a] = True
+                    in_position_long[a] = True
+                    stop_loss[a] = entry_price[a] - (atr[i, a] * trailing_multiplier)
+                else:
+                    short_entries[i, a] = True
+                    in_position_short[a] = True
+                    stop_loss[a] = entry_price[a] + (atr[i, a] * trailing_multiplier)
+                    
+                open_trades_count += 1
+                
+    return long_entries, long_exits, short_entries, short_exits
 
 
 def build_entries_exits(
     close: np.ndarray,
-    phase_array: np.ndarray,
-    hurst_value: float,
-    hurst_threshold: float = 0.6,
-    phase_long_center: float = 4.712,  # 3π/2
-    phase_short_center: float = 1.571,  # π/2
-    phase_tolerance: float = 0.785,  # π/4
+    high: np.ndarray | None = None,
+    low: np.ndarray | None = None,
+    atr: np.ndarray | None = None,
+    phase_array: np.ndarray | None = None,
+    ltf_metric: np.ndarray | None = None,
+    htf_metric: np.ndarray | None = None,
+    volatility_zscore: np.ndarray | None = None,
+    htf_direction: np.ndarray | None = None,
+    rank_metric: np.ndarray | None = None,
+    htf_threshold: float = 38.2, 
+    ltf_threshold: float = 61.8, 
+    veto_threshold: float = 3.0,
+    trailing_multiplier: float = 2.0,
+    breakeven_threshold: float = 1.0,
+    max_concurrent_trades: int = 3,
+    hurst_value: float = 0.6, 
+    hurst_threshold: float = 0.6, 
+    phase_long_center: float = 4.712,  
+    phase_short_center: float = 1.571,  
+    phase_tolerance: float = 0.785,  
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Build long/short entry and exit boolean arrays from cycle phase + Hurst.
-
-    Signal logic:
-    - Long entry: phase near trough (phase_long_center ± tolerance) AND Hurst > threshold
-    - Short entry: phase near peak (phase_short_center ± tolerance) AND Hurst > threshold
-    - Long exit: phase reaches peak zone (short entry zone)
-    - Short exit: phase reaches trough zone (long entry zone)
-
-    Args:
-        close: Close price array.
-        phase_array: Cycle phase values (same length as close).
-        hurst_value: Hurst exponent for the series.
-        hurst_threshold: Minimum Hurst for directional signals.
-        phase_long_center: Center phase angle for long entries (radians).
-        phase_short_center: Center phase angle for short entries (radians).
-        phase_tolerance: Phase tolerance for entry zones (radians).
-
-    Returns:
-        Tuple of (long_entries, long_exits, short_entries, short_exits) boolean arrays.
+    """Build long/short entry and exit boolean arrays from cycle phase + MTF metrics.
+    Handles 1D (single asset) and 2D (multi-asset) inputs.
     """
-    n = len(close)
+    is_1d = close.ndim == 1
+    
+    # Force 2D for Numba processing
+    def to_2d(arr):
+        if arr is None:
+            return None
+        return arr.reshape(-1, 1) if arr.ndim == 1 else arr
 
-    if len(phase_array) != n or n == 0:
-        empty = np.zeros(n, dtype=bool)
-        return empty, empty, empty.copy(), empty.copy()
+    c_2d = to_2d(close).astype(np.float64)
+    h_2d = to_2d(high).astype(np.float64) if high is not None else c_2d.copy()
+    l_2d = to_2d(low).astype(np.float64) if low is not None else c_2d.copy()
+    a_2d = to_2d(atr).astype(np.float64) if atr is not None else np.zeros_like(c_2d)
+    
+    if phase_array is None:
+        empty = np.zeros_like(c_2d, dtype=bool)
+        return (empty.flatten(), empty.flatten(), empty.flatten(), empty.flatten()) if is_1d else (empty, empty, empty, empty)
+        
+    p_2d = to_2d(phase_array).astype(np.float64)
+    
+    # Fill missing metrics with safe defaults if not provided
+    ltf_m = to_2d(ltf_metric).astype(np.float64) if ltf_metric is not None else np.full_like(c_2d, 100.0)
+    htf_m = to_2d(htf_metric).astype(np.float64) if htf_metric is not None else np.full_like(c_2d, 0.0)
+    vz_2d = to_2d(volatility_zscore).astype(np.float64) if volatility_zscore is not None else np.zeros_like(c_2d)
+    hd_2d = to_2d(htf_direction).astype(np.float64) if htf_direction is not None else np.ones_like(c_2d)
+    rm_2d = to_2d(rank_metric).astype(np.float64) if rank_metric is not None else np.zeros_like(c_2d)
 
-    # Normalize phase to 0-2π
-    phase = phase_array % (2.0 * np.pi)
+    long_entries, long_exits, short_entries, short_exits = simulate_portfolio_nb(
+        c_2d, h_2d, l_2d, a_2d, p_2d, ltf_m, htf_m, vz_2d, hd_2d, rm_2d,
+        float(htf_threshold), float(ltf_threshold), float(veto_threshold),
+        float(trailing_multiplier), float(breakeven_threshold),
+        float(phase_long_center), float(phase_short_center), float(phase_tolerance),
+        int(max_concurrent_trades)
+    )
 
-    # Hurst filter: no signals if below threshold
-    if hurst_value < hurst_threshold:
-        empty = np.zeros(n, dtype=bool)
-        return empty, empty, empty.copy(), empty.copy()
-
-    # Entry zones
-    long_zone = np.abs(phase - phase_long_center) < phase_tolerance
-    short_zone = np.abs(phase - phase_short_center) < phase_tolerance
-
-    # Entries: first bar entering the zone (rising edge)
-    long_entries = np.zeros(n, dtype=bool)
-    short_entries = np.zeros(n, dtype=bool)
-
-    for i in range(1, n):
-        if long_zone[i] and not long_zone[i - 1]:
-            long_entries[i] = True
-        if short_zone[i] and not short_zone[i - 1]:
-            short_entries[i] = True
-
-    # Exits: entering the opposite zone
-    long_exits = short_zone.copy()
-    short_exits = long_zone.copy()
-
+    if is_1d:
+        return long_entries.flatten(), long_exits.flatten(), short_entries.flatten(), short_exits.flatten()
     return long_entries, long_exits, short_entries, short_exits
 
 
 def run_backtest(
-    close: pd.Series,
-    phase_array: np.ndarray,
-    hurst_value: float,
+    close: pd.Series | pd.DataFrame,
+    high: pd.Series | pd.DataFrame | None = None,
+    low: pd.Series | pd.DataFrame | None = None,
+    atr: pd.Series | pd.DataFrame | None = None,
+    phase_array: np.ndarray | None = None,
+    hurst_value: float = 0.6,
+    ltf_metric: np.ndarray | None = None,
+    htf_metric: np.ndarray | None = None,
+    volatility_zscore: np.ndarray | None = None,
+    htf_direction: np.ndarray | None = None,
+    rank_metric: np.ndarray | None = None,
+    htf_threshold: float = 38.2,
+    ltf_threshold: float = 61.8,
+    veto_threshold: float = 3.0,
+    trailing_multiplier: float = 2.0,
+    breakeven_threshold: float = 1.0,
+    max_concurrent_trades: int = 3,
+    risk_per_trade: float = 0.01,
     hurst_threshold: float = 0.6,
     initial_capital: float = 100_000.0,
     commission: float = 0.001,
     phase_long_center: float = 4.712,
     phase_short_center: float = 1.571,
     phase_tolerance: float = 0.785,
+    freq: str | None = None,
 ) -> dict | None:
-    """Run a single backtest with given parameters.
-
-    Args:
-        close: Close price Series with DatetimeIndex.
-        phase_array: Cycle phase array matching close length.
-        hurst_value: Hurst exponent.
-        hurst_threshold: Min Hurst for signals.
-        initial_capital: Starting capital.
-        commission: Commission rate per trade.
-        phase_long_center: Long entry phase center.
-        phase_short_center: Short entry phase center.
-        phase_tolerance: Phase zone tolerance.
-
-    Returns:
-        Dict with portfolio stats, or None on failure.
-    """
+    """Run a single backtest with given parameters (1D or 2D)."""
     try:
+        c_val = close.values
+        h_val = high.values if high is not None else None
+        l_val = low.values if low is not None else None
+        a_val = atr.values if atr is not None else None
+
         long_entries, long_exits, short_entries, short_exits = build_entries_exits(
-            close.values, phase_array, hurst_value,
-            hurst_threshold, phase_long_center, phase_short_center, phase_tolerance,
+            c_val, 
+            high=h_val,
+            low=l_val,
+            atr=a_val,
+            phase_array=phase_array,
+            ltf_metric=ltf_metric, htf_metric=htf_metric, volatility_zscore=volatility_zscore,
+            htf_direction=htf_direction, rank_metric=rank_metric,
+            htf_threshold=htf_threshold, ltf_threshold=ltf_threshold, veto_threshold=veto_threshold,
+            trailing_multiplier=trailing_multiplier,
+            breakeven_threshold=breakeven_threshold,
+            max_concurrent_trades=max_concurrent_trades,
+            hurst_value=hurst_value, hurst_threshold=hurst_threshold,
+            phase_long_center=phase_long_center, phase_short_center=phase_short_center,
+            phase_tolerance=phase_tolerance,
         )
 
+        size = np.full(c_val.shape, np.nan)
+        if a_val is not None:
+            # THE CORRECT PERCENT SIZING FORMULA (Phase 3.5 Fix)
+            # Fraction of Equity = Risk% * (Price / Distance to stop)
+            # This ensures that a move of 'Distance_to_Stop' results in a 'Risk%' loss of account equity.
+            
+            # ATR Floor to prevent infinite leverage
+            min_atr = c_val * 0.002
+            safe_atr = np.maximum(a_val, min_atr)
+            
+            distance_to_stop = trailing_multiplier * safe_atr
+            calculated_fraction = risk_per_trade * (c_val / distance_to_stop)
+            
+            # Cap maximum leverage per trade to 1.0 (100% of equity)
+            calculated_fraction = np.minimum(calculated_fraction, 1.0)
+            
+            size[long_entries] = calculated_fraction[long_entries]
+            # size[short_entries] = calculated_fraction[short_entries]
+
         # Run VectorBT portfolio simulation
+        # Using group_by=True groups all columns into a single portfolio for 2D inputs
         pf = vbt.Portfolio.from_signals(
             close,
             entries=long_entries,
             exits=long_exits,
-            short_entries=short_entries,
-            short_exits=short_exits,
+            short_entries=False, # Temporarily long-only to stabilize compounding
+            short_exits=False,
+            size=size if not np.all(np.isnan(size)) else None,
+            size_type="percent",
+            accumulate=False,
             init_cash=initial_capital,
             fees=commission,
-            freq="1D",
+            freq=freq,
+            group_by=True if close.ndim == 2 else None,
         )
 
         stats = pf.stats()
@@ -130,6 +318,7 @@ def run_backtest(
             "max_drawdown": float(stats.get("Max Drawdown [%]", 0.0)),
             "win_rate": float(stats.get("Win Rate [%]", 0.0)),
             "total_trades": int(stats.get("Total Trades", 0)),
+            "profit_factor": float(stats.get("Profit Factor", 0.0)),
             "portfolio": pf,
         }
 
@@ -139,68 +328,79 @@ def run_backtest(
 
 
 def run_parameter_sweep(
-    close: pd.Series,
-    phase_array: np.ndarray,
-    hurst_value: float,
+    close: pd.Series | pd.DataFrame,
+    high: pd.Series | pd.DataFrame | None = None,
+    low: pd.Series | pd.DataFrame | None = None,
+    atr: pd.Series | pd.DataFrame | None = None,
+    phase_array: np.ndarray | None = None,
+    hurst_value: float = 0.6,
+    ltf_metric: np.ndarray | None = None,
+    htf_metric: np.ndarray | None = None,
+    volatility_zscore: np.ndarray | None = None,
+    htf_direction: np.ndarray | None = None,
+    rank_metric: np.ndarray | None = None,
     hurst_range: list[float] | None = None,
     phase_long_range: list[float] | None = None,
     phase_short_range: list[float] | None = None,
+    trailing_multiplier_range: list[float] | None = None,
+    breakeven_threshold: float = 2.0,
+    max_concurrent_trades: int = 3,
+    risk_per_trade: float = 0.02,
     initial_capital: float = 100_000.0,
     commission: float = 0.001,
+    freq: str | None = None,
 ) -> pd.DataFrame:
-    """Sweep strategy parameters across a multi-dimensional grid.
-
-    Iterates over all combinations of hurst_threshold, phase_long_center,
-    and phase_short_center, running a backtest for each.
-
-    Args:
-        close: Close price Series.
-        phase_array: Cycle phase array.
-        hurst_value: Actual Hurst exponent of the data.
-        hurst_range: List of hurst_threshold values to test.
-        phase_long_range: List of long entry phase centers to test.
-        phase_short_range: List of short entry phase centers to test.
-        initial_capital: Starting capital.
-        commission: Commission rate.
-
-    Returns:
-        DataFrame with columns: hurst_threshold, phase_long, phase_short,
-        total_return, sharpe_ratio, max_drawdown, win_rate, total_trades.
-    """
+    """Sweep strategy parameters across a multi-dimensional grid."""
     if hurst_range is None:
-        hurst_range = [0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9]
+        hurst_range = [0.35, 0.40, 0.45, 0.50, 0.55, 0.60]
     if phase_long_range is None:
         phase_long_range = [4.0, 4.4, 4.712, 5.0, 5.5]
     if phase_short_range is None:
         phase_short_range = [1.0, 1.3, 1.571, 1.8, 2.1]
+    if trailing_multiplier_range is None:
+        trailing_multiplier_range = [2.5, 3.0, 3.5]
 
     results = []
-    total_combos = len(hurst_range) * len(phase_long_range) * len(phase_short_range)
+    total_combos = len(hurst_range) * len(phase_long_range) * len(phase_short_range) * len(trailing_multiplier_range)
     logger.info(f"Parameter sweep: {total_combos} combinations")
 
     for ht in hurst_range:
         for pl in phase_long_range:
             for ps in phase_short_range:
-                result = run_backtest(
-                    close, phase_array, hurst_value,
-                    hurst_threshold=ht,
-                    initial_capital=initial_capital,
-                    commission=commission,
-                    phase_long_center=pl,
-                    phase_short_center=ps,
-                )
+                for tm in trailing_multiplier_range:
+                    ltf_chop_threshold = 50 - 118 * (ht - 0.5)
 
-                row = {
-                    "hurst_threshold": ht,
-                    "phase_long": pl,
-                    "phase_short": ps,
-                    "total_return": result["total_return"] if result else 0.0,
-                    "sharpe_ratio": result["sharpe_ratio"] if result else 0.0,
-                    "max_drawdown": result["max_drawdown"] if result else 0.0,
-                    "win_rate": result["win_rate"] if result else 0.0,
-                    "total_trades": result["total_trades"] if result else 0,
-                }
-                results.append(row)
+                    result = run_backtest(
+                        close, high=high, low=low, atr=atr, phase_array=phase_array, hurst_value=hurst_value,
+                        ltf_metric=ltf_metric, htf_metric=htf_metric, volatility_zscore=volatility_zscore,
+                        htf_direction=htf_direction, rank_metric=rank_metric,
+                        hurst_threshold=ht,
+                        ltf_threshold=ltf_chop_threshold,
+                        htf_threshold=38.2, 
+                        trailing_multiplier=tm,
+                        breakeven_threshold=breakeven_threshold,
+                        max_concurrent_trades=max_concurrent_trades,
+                        risk_per_trade=risk_per_trade,
+                        initial_capital=initial_capital,
+                        commission=commission,
+                        phase_long_center=pl,
+                        phase_short_center=ps,
+                        freq=freq,
+                    )
+
+                    row = {
+                        "hurst_threshold": ht,
+                        "phase_long": pl,
+                        "phase_short": ps,
+                        "trailing_multiplier": tm,
+                        "total_return": result["total_return"] if result else 0.0,
+                        "sharpe_ratio": result["sharpe_ratio"] if result else 0.0,
+                        "max_drawdown": result["max_drawdown"] if result else 0.0,
+                        "win_rate": result["win_rate"] if result else 0.0,
+                        "profit_factor": result["profit_factor"] if result else 0.0,
+                        "total_trades": result["total_trades"] if result else 0,
+                    }
+                    results.append(row)
 
     df = pd.DataFrame(results)
     logger.info(f"Sweep complete: {len(df)} results")

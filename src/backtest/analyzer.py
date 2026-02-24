@@ -25,22 +25,25 @@ def extract_trade_log(portfolio) -> pd.DataFrame:
         portfolio: VectorBT Portfolio object.
 
     Returns:
-        DataFrame with columns: entry_time, exit_time, direction,
-        entry_price, exit_price, pnl, return_pct.
+        DataFrame with columns: symbol, entry_time, exit_time, direction,
+        size, entry_price, entry_value_usdt, exit_price, pnl, return_pct.
     """
     try:
         trades = portfolio.trades.records_readable
         if trades.empty:
             return pd.DataFrame(columns=[
-                "entry_time", "exit_time", "direction",
-                "entry_price", "exit_price", "pnl", "return_pct",
+                "symbol", "entry_time", "exit_time", "direction",
+                "size", "entry_price", "entry_value_usdt", "exit_price", "pnl", "return_pct",
             ])
 
         log = pd.DataFrame({
+            "symbol": trades["Column"].values,
             "entry_time": trades["Entry Timestamp"].values,
             "exit_time": trades["Exit Timestamp"].values,
             "direction": trades["Direction"].values,
+            "size": trades["Size"].values,
             "entry_price": trades["Avg Entry Price"].values,
+            "entry_value_usdt": trades["Size"].values * trades["Avg Entry Price"].values,
             "exit_price": trades["Avg Exit Price"].values,
             "pnl": trades["PnL"].values,
             "return_pct": trades["Return"].values * 100,
@@ -58,15 +61,17 @@ def export_trade_log_csv(portfolio, output_path: str, symbol: str = "") -> str |
     Args:
         portfolio: VectorBT Portfolio object.
         output_path: Path for the CSV file.
-        symbol: Symbol name to add as column.
+        symbol: Fallback symbol name if not a multi-asset portfolio.
 
     Returns:
         Path to the saved CSV, or None on failure.
     """
     try:
         log = extract_trade_log(portfolio)
-        if symbol:
-            log.insert(0, "symbol", symbol)
+        
+        # If the log only has one generic symbol or is empty, we can label it
+        if symbol and (log.empty or (len(log['symbol'].unique()) == 1 and log['symbol'].iloc[0] == 0)):
+             log['symbol'] = symbol
 
         path = Path(output_path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -129,12 +134,7 @@ def find_best_params(sweep_results: pd.DataFrame, top_n: int = 3) -> pd.DataFram
 
 
 def recommend_config(sweep_results: pd.DataFrame) -> dict | None:
-    """Get recommended config from sweep results.
-
-    Returns:
-        Dict with recommended hurst_threshold, phase_long, phase_short
-        and their performance metrics, or None if no valid results.
-    """
+    """Get recommended config from sweep results."""
     best = find_best_params(sweep_results, top_n=1)
     if best.empty:
         return None
@@ -144,6 +144,7 @@ def recommend_config(sweep_results: pd.DataFrame) -> dict | None:
         "hurst_threshold": float(row["hurst_threshold"]),
         "phase_long": float(row["phase_long"]),
         "phase_short": float(row["phase_short"]),
+        "trailing_multiplier": float(row["trailing_multiplier"]) if "trailing_multiplier" in row else 2.0,
         "sharpe_ratio": float(row["sharpe_ratio"]),
         "max_drawdown": float(row["max_drawdown"]),
         "win_rate": float(row["win_rate"]),
@@ -152,17 +153,7 @@ def recommend_config(sweep_results: pd.DataFrame) -> dict | None:
 
 
 def update_strategy_config(recommendation: dict) -> bool:
-    """Update config/strategy.toml with recommended parameters.
-
-    Reads the current TOML, updates hurst threshold, and logs
-    the previous values for rollback reference.
-
-    Args:
-        recommendation: Dict from recommend_config().
-
-    Returns:
-        True if config was updated, False on failure.
-    """
+    """Update config/strategy.toml with recommended parameters."""
     config_path = CONFIG_DIR / "strategy.toml"
 
     try:
@@ -172,18 +163,22 @@ def update_strategy_config(recommendation: dict) -> bool:
 
         content = config_path.read_text()
 
-        # Log previous values
-        logger.info("Updating strategy config with recommended params:")
-        logger.info(f"  hurst_threshold: {recommendation['hurst_threshold']}")
-        logger.info(f"  Sharpe: {recommendation['sharpe_ratio']:.4f}")
-        logger.info(f"  Max DD: {recommendation['max_drawdown']:.2f}%")
-
         # Update threshold value in TOML
         lines = content.split("\n")
         updated_lines = []
+        current_section = ""
+        
         for line in lines:
-            if line.strip().startswith("threshold") and "[hurst]" in "\n".join(updated_lines[-5:]):
+            trimmed = line.strip()
+            if trimmed.startswith("[") and trimmed.endswith("]"):
+                current_section = trimmed
+            
+            if current_section == "[hurst]" and trimmed.startswith("threshold"):
                 updated_lines.append(f"threshold = {recommendation['hurst_threshold']}")
+            elif current_section == "[risk]" and trimmed.startswith("trailing_atr_multiplier"):
+                updated_lines.append(f"trailing_atr_multiplier = {recommendation['trailing_multiplier']}")
+            elif current_section == "[cycle]" and trimmed.startswith("phase_long"): # if we added it
+                 updated_lines.append(line) # keep as is or update if we add to toml
             else:
                 updated_lines.append(line)
 

@@ -19,6 +19,8 @@ dependencies = [
     "apscheduler>=3.10",
     "aiohttp>=3.9",
     "tomli>=2.0; python_version < '3.11'",
+    "psycopg2-binary>=2.9.11",
+    "sqlalchemy>=2.0.46",
 ]
 
 [dependency-groups]

@@ -23,6 +23,7 @@ def generate_signal(
     timeframe: str,
     hurst_threshold: float = 0.6,
     lowpass_cutoff: float = 0.1,
+    htf_df: pd.DataFrame | None = None,
 ) -> dict | None:
     """Generate combined trading signal for a single symbol/timeframe.
 
@@ -40,6 +41,7 @@ def generate_signal(
         timeframe: Timeframe string.
         hurst_threshold: Minimum Hurst value for signal generation.
         lowpass_cutoff: Low-pass filter cutoff frequency.
+        htf_df: Optional Higher Timeframe DataFrame for Top-Down filtering.
 
     Returns:
         Signal dict, or None on failure.
@@ -55,6 +57,13 @@ def generate_signal(
         # Compute Hurst
         hurst_value = calculate_hurst(df)
 
+        htf_hurst_value = 0.5
+        if htf_df is not None and not htf_df.empty:
+            htf_hurst_value = calculate_hurst(htf_df)
+
+        atr_zscore = _calculate_atr_zscore(df)
+        is_vetoed = atr_zscore > 3.0
+
         # Build signal dict
         if cycle_result is None:
             cycle_result = {
@@ -66,7 +75,39 @@ def generate_signal(
             }
 
         # Determine signal direction based on cycle phase and Hurst
-        signal = _determine_signal(cycle_result["current_phase"], hurst_value, hurst_threshold)
+        # Dual Hurst Handshake (Live): if (H_daily >= 0.55) AND (H_15m < 0.45)
+        # Using 0.55 as HTF threshold and 0.45 as LTF threshold, if htf_df is provided.
+        # Else, fallback to single timeframe logic.
+        signal = "neutral"
+        if is_vetoed:
+            signal = "neutral"
+        else:
+            if htf_df is not None:
+                # MTF logic: buy the dip
+                # Macro expanding (htf_hurst_value >= 0.55), Micro compressing (hurst_value < 0.45)
+                # Note: direction is determined by HTF cycle or LTF cycle?
+                # Actually, the story says "if (H_daily >= 0.55) AND (H_15m < 0.45)"
+                # To be precise, we still need directional bias. Let's use LTF phase for timing entry.
+                # If htf_hurst_value >= 0.55 and hurst_value < 0.45:
+                # We need to know if HTF is LONG or SHORT. For now, assume we just check if HTF is trending.
+                # If MTF is active, we trigger if htf_hurst >= 0.55 and ltf_hurst < 0.45
+                if htf_hurst_value >= 0.55 and hurst_value < 0.45:
+                    signal = _determine_signal(cycle_result["current_phase"], 1.0, 0.0) # force pass hurst check
+            else:
+                signal = _determine_signal(cycle_result["current_phase"], hurst_value, hurst_threshold)
+
+        # Calculate Risk Levels (TP/SL)
+        tp_price = 0.0
+        sl_price = 0.0
+        atr_value = calculate_atr_scalar(df, period=14)
+        current_price = float(df["close_price"].iloc[-1])
+
+        if signal == "long":
+            sl_price = current_price - (1.5 * atr_value)
+            tp_price = current_price + (2.0 * atr_value) # Or use cycle amplitude if reliable
+        elif signal == "short":
+            sl_price = current_price + (1.5 * atr_value)
+            tp_price = current_price - (2.0 * atr_value)
 
         return {
             "symbol": symbol,
@@ -74,15 +115,75 @@ def generate_signal(
             "dominant_period": cycle_result["dominant_period"],
             "current_phase": cycle_result["current_phase"],
             "hurst_value": hurst_value,
+            "htf_hurst_value": htf_hurst_value if htf_df is not None else None,
+            "atr_zscore": atr_zscore,
+            "is_vetoed": is_vetoed,
             "phase_array": cycle_result["phase_array"],
             "projection_array": cycle_result["projection_array"],
             "amplitude": cycle_result["amplitude"],
             "signal": signal,
+            "atr": atr_value,
+            "tp": round(tp_price, 4),
+            "sl": round(sl_price, 4),
         }
 
     except Exception as e:
         logger.error(f"Signal generation failed for {symbol}/{timeframe}: {e}")
         return None
+
+
+def calculate_atr_scalar(df: pd.DataFrame, period: int = 14) -> float:
+    """Calculate Average True Range (ATR)."""
+    try:
+        high = df["high_price"]
+        low = df["low_price"]
+        close = df["close_price"]
+        
+        # True Range
+        tr1 = high - low
+        tr2 = (high - close.shift()).abs()
+        tr3 = (low - close.shift()).abs()
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        
+        # ATR (Simple Moving Average of TR for stability, or Wilder's)
+        # Using simple mean for robustness on small samples
+        atr = tr.rolling(window=period).mean().iloc[-1]
+        
+        if pd.isna(atr):
+            return 0.0
+        return float(atr)
+    except Exception:
+        return 0.0
+
+def calculate_atr_zscore_series(df: pd.DataFrame, period: int = 14, z_period: int = 50) -> pd.Series:
+    """Calculate rolling Z-Score of the ATR as a Series."""
+    high = df["high_price"]
+    low = df["low_price"]
+    close = df["close_price"]
+    
+    tr1 = high - low
+    tr2 = (high - close.shift(1)).abs()
+    tr3 = (low - close.shift(1)).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    
+    atr = tr.rolling(window=period).mean()
+    
+    rolling_mean = atr.rolling(window=z_period).mean()
+    rolling_std = atr.rolling(window=z_period).std()
+    
+    z_score = (atr - rolling_mean) / rolling_std
+    return z_score.fillna(0.0)
+
+def _calculate_atr_zscore(df: pd.DataFrame, period: int = 14, z_period: int = 50) -> float:
+    """Calculate rolling Z-Score of the ATR."""
+    try:
+        z_score = calculate_atr_zscore_series(df, period, z_period)
+        val = z_score.iloc[-1]
+        if pd.isna(val):
+            return 0.0
+        return float(val)
+    except Exception:
+        return 0.0
 
 
 def _determine_signal(current_phase: float, hurst_value: float, hurst_threshold: float) -> str:

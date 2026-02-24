@@ -10,13 +10,14 @@ from src.data_loader import (
     get_connection,
     query_ohlcv,
     upsert_ohlcv,
+    get_latest_timestamp,
 )
 
 
 @pytest.fixture
 def db_conn(tmp_path):
     """Create an in-memory DuckDB connection with schema initialized."""
-    settings = AppSettings(duckdb_path=str(tmp_path / "test.duckdb"))
+    settings = AppSettings(duckdb_path=str(tmp_path / "test.duckdb"), use_postgres=False)
     conn = get_connection(settings)
     yield conn
     conn.close()
@@ -39,7 +40,7 @@ def sample_ohlcv_df():
 
 class TestGetConnection:
     def test_creates_database_file(self, tmp_path):
-        settings = AppSettings(duckdb_path=str(tmp_path / "new.duckdb"))
+        settings = AppSettings(duckdb_path=str(tmp_path / "new.duckdb"), use_postgres=False)
         conn = get_connection(settings)
         assert (tmp_path / "new.duckdb").exists()
         conn.close()
@@ -55,14 +56,14 @@ class TestGetConnection:
             assert expected in col_names
 
     def test_creates_parent_directories(self, tmp_path):
-        settings = AppSettings(duckdb_path=str(tmp_path / "subdir" / "deep" / "test.duckdb"))
+        settings = AppSettings(duckdb_path=str(tmp_path / "subdir" / "deep" / "test.duckdb"), use_postgres=False)
         conn = get_connection(settings)
         assert (tmp_path / "subdir" / "deep" / "test.duckdb").exists()
         conn.close()
 
     def test_idempotent_table_creation(self, tmp_path):
         """Calling get_connection twice should not fail."""
-        settings = AppSettings(duckdb_path=str(tmp_path / "test.duckdb"))
+        settings = AppSettings(duckdb_path=str(tmp_path / "test.duckdb"), use_postgres=False)
         conn1 = get_connection(settings)
         conn1.close()
         conn2 = get_connection(settings)
@@ -153,6 +154,15 @@ class TestQueryOhlcv:
         timestamps = result["timestamp"].tolist()
         assert timestamps == sorted(timestamps)
 
+
+class TestGetLatestTimestamp:
+    def test_returns_none_when_empty(self, db_conn):
+        assert get_latest_timestamp(db_conn, "AAPL", "1h") is None
+
+    def test_returns_max_timestamp(self, db_conn, sample_ohlcv_df):
+        upsert_ohlcv(db_conn, sample_ohlcv_df)
+        latest = get_latest_timestamp(db_conn, "AAPL", "1h")
+        assert latest == pd.Timestamp("2026-01-01 11:00")
 
 class TestCountRows:
     def test_count_all_rows(self, db_conn, sample_ohlcv_df):

@@ -9,13 +9,12 @@ import time
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from loguru import logger
 
-from src.config import AppSettings, AssetConfig, TimeframeConfig
+from src.config import AppSettings, AssetConfig, TimeframeConfig, PaperConfig
 from src.data_loader import get_connection, query_ohlcv
 from src.fetchers.orchestrator import fetch_all_assets
-from src.signals.cycles import detect_dominant_cycle_filtered
-from src.signals.fractals import calculate_hurst
-from src.signals.filters import _determine_signal
+from src.signals.filters import generate_signal
 from src.services.notifier import TelegramNotifier
+from src.services.trader import PaperTrader
 
 
 class IngestionScheduler:
@@ -26,11 +25,13 @@ class IngestionScheduler:
         settings: AppSettings,
         assets: AssetConfig,
         timeframes: TimeframeConfig,
+        paper_config: PaperConfig,
         interval_minutes: int = 5,
     ) -> None:
         self.settings = settings
         self.assets = assets
         self.timeframes = timeframes
+        self.paper_config = paper_config
         self.interval_minutes = interval_minutes
         self.scheduler = AsyncIOScheduler()
         self.notifier = TelegramNotifier(settings)
@@ -42,24 +43,40 @@ class IngestionScheduler:
         """Single fetch cycle."""
         logger.info("Executing scheduled fetch job...")
         conn = get_connection(self.settings, read_only=False)
+        trader = PaperTrader(conn, self.paper_config)
+        
         try:
+            # 1. Fetch Data
             result = await fetch_all_assets(conn, self.assets, self.timeframes)
             logger.info(f"Scheduled fetch complete: {result.rows_upserted} rows upserted")
             
-            # Run signal scan immediately after fetch
-            await self._scan_signals(conn)
+            # 2. Monitor Existing Positions (Exit Logic)
+            # We need current prices. Let's fetch latest close for all symbols from DB.
+            current_prices = {}
+            for symbol in self.assets.all_symbols:
+                # Get latest price from 1m or 5m or just whatever we have most recent
+                # We'll use the smallest timeframe available for best price accuracy
+                tf = self.timeframes.default_timeframes[0] # e.g. 1m
+                df = query_ohlcv(conn, symbol, tf, limit=1)
+                if not df.empty:
+                    current_prices[symbol] = float(df["close_price"].iloc[-1])
+            
+            if current_prices:
+                trader.monitor_positions(current_prices)
+            
+            # 3. Scan for New Signals (Entry Logic)
+            await self._scan_signals(conn, trader)
             
         except Exception as e:
             logger.error(f"Scheduled fetch failed: {e}")
         finally:
             conn.close()
 
-    async def _scan_signals(self, conn) -> None:
+    async def _scan_signals(self, conn, trader: PaperTrader) -> None:
         """Scan all assets for trading signals and log them."""
         logger.info("Scanning for trading signals...")
         
         # Determine strategy config (load lazily or pass in init)
-        # For now we use defaults or load from toml if needed
         from src.config import StrategyConfig
         strategy = StrategyConfig()
         
@@ -71,42 +88,59 @@ class IngestionScheduler:
         for symbol in symbols:
             for tf in timeframes:
                 try:
-                    df = query_ohlcv(conn, symbol, tf, limit=500) # Fetch enough for signal
+                    df = query_ohlcv(conn, symbol, tf, limit=500)
                     if df.empty or len(df) < strategy.hurst_min_data_points:
                         continue
                         
-                    # Compute signals
-                    hurst = calculate_hurst(df)
-                    cycle = detect_dominant_cycle_filtered(df, cutoff=strategy.cycle_lowpass_cutoff)
+                    # Use shared signal generation logic
+                    result = generate_signal(
+                        df, symbol, tf, 
+                        hurst_threshold=strategy.hurst_threshold,
+                        lowpass_cutoff=strategy.cycle_lowpass_cutoff
+                    )
                     
-                    if cycle:
-                        signal = _determine_signal(
-                            cycle["current_phase"], 
-                            hurst, 
-                            strategy.hurst_threshold
-                        )
+                    if result and result["signal"] in ["long", "short"]:
+                        signal = result["signal"]
+                        price = df["close_price"].iloc[-1]
+                        hurst = result["hurst_value"]
+                        phase = result["current_phase"]
+                        tp = result.get("tp", 0.0)
+                        sl = result.get("sl", 0.0)
                         
-                        if signal in ["long", "short"]:
-                            price = df["close_price"].iloc[-1]
-                            # Log signal
-                            log_msg = (
-                                f"🚨 {signal.upper()} SIGNAL detected: {symbol} [{tf}] @ {price:.2f} "
-                                f"(Hurst={hurst:.2f}, Phase={cycle['current_phase']:.2f})"
-                            )
-                            logger.bind(SIGNAL=True).info(log_msg)
-                            signal_count += 1
-                            
-                            # Send Telegram alert
-                            emoji = "🟢" if signal == "long" else "🔴"
-                            tg_msg = (
-                                f"{emoji} *{signal.upper()} SIGNAL*\n"
-                                f"**Asset:** `{symbol}`\n"
-                                f"**TF:** `{tf}`\n"
-                                f"**Price:** `{price:.2f}`\n"
-                                f"**Hurst:** `{hurst:.2f}`\n"
-                                f"**Phase:** `{cycle['current_phase']:.2f}`"
-                            )
-                            await self.notifier.send(tg_msg)
+                        # Prepare signal data for trader
+                        signal_data = {
+                            "symbol": symbol,
+                            "timeframe": tf,
+                            "signal": signal,
+                            "price": price,
+                            "tp": tp,
+                            "sl": sl
+                        }
+                        
+                        # Execute Trade (Paper)
+                        if trader.open_position(signal_data):
+                            logger.info(f"Paper Trade Opened: {symbol} {signal}")
+
+                        # Log signal
+                        log_msg = (
+                            f"🚨 {signal.upper()} SIGNAL: {symbol} [{tf}] @ {price:.2f} | "
+                            f"TP: {tp:.2f} | SL: {sl:.2f} | Hurst: {hurst:.2f}"
+                        )
+                        logger.bind(SIGNAL=True).info(log_msg)
+                        signal_count += 1
+                        
+                        # Send Telegram alert
+                        emoji = "🟢" if signal == "long" else "🔴"
+                        tg_msg = (
+                            f"{emoji} *{signal.upper()} SIGNAL*\n"
+                            f"**Asset:** `{symbol}`\n"
+                            f"**TF:** `{tf}`\n"
+                            f"**Price:** `{price:.2f}`\n"
+                            f"**TP:** `{tp:.2f}`\n"
+                            f"**SL:** `{sl:.2f}`\n"
+                            f"**Hurst:** `{hurst:.2f}`"
+                        )
+                        await self.notifier.send(tg_msg)
                             
                 except Exception as e:
                     logger.error(f"Signal scan error for {symbol}/{tf}: {e}")
@@ -143,8 +177,9 @@ async def run_scheduler_service(
     settings: AppSettings,
     assets: AssetConfig,
     timeframes: TimeframeConfig,
+    paper_config: PaperConfig,
     interval: int = 5
 ) -> None:
     """Entry point for the scheduler process."""
-    service = IngestionScheduler(settings, assets, timeframes, interval_minutes=interval)
+    service = IngestionScheduler(settings, assets, timeframes, paper_config, interval_minutes=interval)
     await service.start()
