@@ -291,7 +291,7 @@ def run_backtest(
             calculated_fraction = np.minimum(calculated_fraction, 1.0)
             
             size[long_entries] = calculated_fraction[long_entries]
-            # size[short_entries] = calculated_fraction[short_entries]
+            size[short_entries] = calculated_fraction[short_entries]
 
         # Run VectorBT portfolio simulation
         # Using group_by=True groups all columns into a single portfolio for 2D inputs
@@ -299,8 +299,8 @@ def run_backtest(
             close,
             entries=long_entries,
             exits=long_exits,
-            short_entries=False, # Temporarily long-only to stabilize compounding
-            short_exits=False,
+            short_entries=short_entries,
+            short_exits=short_exits,
             size=size if not np.all(np.isnan(size)) else None,
             size_type="percent",
             accumulate=False,
