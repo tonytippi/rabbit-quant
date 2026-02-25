@@ -86,7 +86,7 @@ async def run_bulk_backtest(
             df_time["timestamp"] = pd.to_datetime(df_time["timestamp"])
             df_time.set_index("timestamp", inplace=True)
             
-            rolling_hurst = calculate_rolling_hurst(df_time, window=30).shift(1).ffill()
+            rolling_hurst = calculate_rolling_hurst(df_time, window=100).shift(1).ffill()
             
             close_dict[sym] = df_time["close_price"]
             high_dict[sym] = df_time["high_price"]
@@ -161,11 +161,15 @@ async def run_bulk_backtest(
             volatility_zscore=matrix_vol_z.values,
             htf_direction=matrix_htf_dir.values,
             rank_metric=matrix_rank.values,
+            macro_filter_type=strategy.macro_filter_type,
+            htf_threshold=strategy.htf_threshold,
+            ltf_threshold=strategy.ltf_threshold,
+            veto_threshold=strategy.veto_threshold,
             hurst_threshold=strategy.hurst_threshold,
-            trailing_multiplier=strategy.trailing_atr_multiplier, # FIXED
-            breakeven_threshold=strategy.breakeven_atr_threshold, # FIXED
-            max_concurrent_trades=strategy.max_concurrent_trades, # FIXED
-            risk_per_trade=strategy.risk_per_trade,               # FIXED
+            trailing_multiplier=strategy.trailing_atr_multiplier,
+            breakeven_threshold=strategy.breakeven_atr_threshold,
+            max_concurrent_trades=strategy.max_concurrent_trades,
+            risk_per_trade=strategy.risk_per_trade,
             initial_capital=strategy.backtest_initial_capital,
             commission=strategy.backtest_commission,
             freq=freq_str

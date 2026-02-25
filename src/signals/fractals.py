@@ -43,7 +43,7 @@ def calculate_hurst(df: pd.DataFrame, column: str = "close_price") -> float:
         return 0.5
 
 
-def calculate_rolling_hurst(df: pd.DataFrame, column: str = "close_price", window: int = 30) -> pd.Series:
+def calculate_rolling_hurst(df: pd.DataFrame, column: str = "close_price", window: int = 100) -> pd.Series:
     """Calculate Rolling Hurst Exponent from OHLCV DataFrame."""
     if df is None or len(df) < window:
         logger.warning(f"Insufficient data for rolling Hurst: need {window}+ rows")

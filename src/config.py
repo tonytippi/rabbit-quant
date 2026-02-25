@@ -105,6 +105,13 @@ class StrategyConfig:
         self.cycle_projection_bars: int = cycle.get("projection_bars", 20)
         self.cycle_lowpass_cutoff: float = cycle.get("lowpass_cutoff", 0.1)
 
+        # Filter settings
+        filters = data.get("filters", {})
+        self.macro_filter_type: str = filters.get("macro_filter_type", "both")
+        self.htf_threshold: float = filters.get("htf_threshold", 50.0)
+        self.ltf_threshold: float = filters.get("ltf_threshold", 50.0)
+        self.veto_threshold: float = filters.get("veto_threshold", 3.0)
+
         # Backtest settings
         self.backtest_hurst_range: list[float] = backtest.get("hurst_range", [0.5, 0.6, 0.7, 0.8, 0.9])
         self.backtest_phase_long_range: list[float] = backtest.get("phase_long_range", [4.0, 4.4, 4.712, 5.0, 5.5])

@@ -11,6 +11,12 @@ max_period = 200
 projection_bars = 20
 lowpass_cutoff = 0.1
 
+[filters]
+macro_filter_type = "chop" # "hurst", "chop", or "both"
+htf_threshold = 45 # CHOP ranging threshold
+ltf_threshold = 61.8 # CHOP trending threshold
+veto_threshold = 3.0 # Volatility z-score veto
+
 [backtest]
 hurst_range = [0.35, 0.40, 0.45, 0.50, 0.55, 0.60]
 phase_long_range = [4.0, 4.4, 4.712, 5.0, 5.5]

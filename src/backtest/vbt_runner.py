@@ -33,6 +33,7 @@ def simulate_portfolio_nb(
     ltf_threshold: float,
     veto_threshold: float,
     hurst_threshold: float,
+    macro_filter_type: int,
     trailing_multiplier: float,
     breakeven_threshold: float,
     phase_long_center: float,
@@ -113,14 +114,28 @@ def simulate_portfolio_nb(
             # Rank candidates by Volatility-Adjusted Momentum
             scores = np.full(n_assets, -1e10, dtype=np.float64)
             dirs = np.zeros(n_assets, dtype=np.int8) # 1=Long, -1=Short
-            
             for a in range(n_assets):
-                if in_position_long[a] or in_position_short[a]:
+                if in_position_long[a] or in_position_short[a] or long_exits[i, a] or short_exits[i, a]:
+                    continue
+
+                phase = phase_array[i, a] % (2.0 * np.pi)                
+                # Check Veto first
+                if volatility_zscore[i, a] >= veto_threshold:
                     continue
                     
-                phase = phase_array[i, a] % (2.0 * np.pi)
-                # valid = (htf_metric[i, a] < htf_threshold) and (ltf_metric[i, a] > ltf_threshold) and (volatility_zscore[i, a] < veto_threshold) and (hurst_value[i, a] > hurst_threshold)
-                valid = (htf_metric[i, a] < htf_threshold) and (ltf_metric[i, a] > ltf_threshold) and (volatility_zscore[i, a] < veto_threshold)
+                # Evaluate macro filters based on macro_filter_type
+                # 0 = chop, 1 = hurst, 2 = both
+                valid = False
+                chop_valid = (htf_metric[i, a] < htf_threshold) and (ltf_metric[i, a] > ltf_threshold)
+                hurst_valid = (hurst_value[i, a] > hurst_threshold)
+                
+                if macro_filter_type == 0:
+                    valid = chop_valid
+                elif macro_filter_type == 1:
+                    valid = hurst_valid
+                else: # 2 = both
+                    valid = chop_valid and hurst_valid
+                    
                 if not valid:
                     continue
                     
@@ -132,7 +147,7 @@ def simulate_portfolio_nb(
                         dirs[a] = 1
                 elif htf_direction[i, a] <= 0:
                     if abs(phase - phase_short_center) < phase_tolerance and not (abs(prev_phase - phase_short_center) < phase_tolerance):
-                        scores[a] = rank_metric[i, a]
+                        scores[a] = -rank_metric[i, a]
                         dirs[a] = -1
             
             # Sort by Momentum Score descending
@@ -172,14 +187,16 @@ def build_entries_exits(
     volatility_zscore: np.ndarray | None = None,
     htf_direction: np.ndarray | None = None,
     rank_metric: np.ndarray | None = None,
-    htf_threshold: float = 38.2, 
+    htf_threshold: float = 45, 
     ltf_threshold: float = 61.8, 
     veto_threshold: float = 3.0,
     trailing_multiplier: float = 2.0,
-        breakeven_threshold: float = 1.0,
-        max_concurrent_trades: int = 3,
-        hurst_value: np.ndarray | float = 0.6,
-        hurst_threshold: float = 0.6,    phase_long_center: float = 4.712,  
+    breakeven_threshold: float = 1.0,
+    max_concurrent_trades: int = 3,
+    hurst_value: np.ndarray | float = 0.6,
+    hurst_threshold: float = 0.6,
+    macro_filter_type: str = "both",
+    phase_long_center: float = 4.712,  
     phase_short_center: float = 1.571,  
     phase_tolerance: float = 0.785,  
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -216,10 +233,13 @@ def build_entries_exits(
         hv_2d = np.full_like(c_2d, float(hurst_value))
     else:
         hv_2d = to_2d(hurst_value).astype(np.float64)
+        
+    filter_type_map = {"chop": 0, "hurst": 1, "both": 2}
+    mf_type = filter_type_map.get(macro_filter_type, 2)
 
     long_entries, long_exits, short_entries, short_exits = simulate_portfolio_nb(
         c_2d, h_2d, l_2d, a_2d, p_2d, ltf_m, htf_m, vz_2d, hd_2d, rm_2d, hv_2d,
-        float(htf_threshold), float(ltf_threshold), float(veto_threshold), float(hurst_threshold),
+        float(htf_threshold), float(ltf_threshold), float(veto_threshold), float(hurst_threshold), int(mf_type),
         float(trailing_multiplier), float(breakeven_threshold),
         float(phase_long_center), float(phase_short_center), float(phase_tolerance),
         int(max_concurrent_trades)
@@ -242,7 +262,7 @@ def run_backtest(
     volatility_zscore: np.ndarray | None = None,
     htf_direction: np.ndarray | None = None,
     rank_metric: np.ndarray | None = None,
-    htf_threshold: float = 38.2,
+    htf_threshold: float = 45,
     ltf_threshold: float = 61.8,
     veto_threshold: float = 3.0,
     trailing_multiplier: float = 2.0,
@@ -250,6 +270,7 @@ def run_backtest(
     max_concurrent_trades: int = 3,
     risk_per_trade: float = 0.01,
     hurst_threshold: float = 0.6,
+    macro_filter_type: str = "both",
     initial_capital: float = 100_000.0,
     commission: float = 0.001,
     phase_long_center: float = 4.712,
@@ -277,6 +298,7 @@ def run_backtest(
             breakeven_threshold=breakeven_threshold,
             max_concurrent_trades=max_concurrent_trades,
             hurst_value=hurst_value, hurst_threshold=hurst_threshold,
+            macro_filter_type=macro_filter_type,
             phase_long_center=phase_long_center, phase_short_center=phase_short_center,
             phase_tolerance=phase_tolerance,
         )
@@ -350,6 +372,7 @@ def run_parameter_sweep(
     phase_long_range: list[float] | None = None,
     phase_short_range: list[float] | None = None,
     trailing_multiplier_range: list[float] | None = None,
+    macro_filter_type_range: list[str] | None = None,
     breakeven_threshold: float = 2.0,
     max_concurrent_trades: int = 3,
     risk_per_trade: float = 0.02,
@@ -366,43 +389,48 @@ def run_parameter_sweep(
         phase_short_range = [1.0, 1.3, 1.571, 1.8, 2.1]
     if trailing_multiplier_range is None:
         trailing_multiplier_range = [2.5, 3.0, 3.5]
+    if macro_filter_type_range is None:
+        macro_filter_type_range = ["both"]
 
     results = []
-    total_combos = len(hurst_range) * len(phase_long_range) * len(phase_short_range) * len(trailing_multiplier_range)
+    total_combos = len(hurst_range) * len(phase_long_range) * len(phase_short_range) * len(trailing_multiplier_range) * len(macro_filter_type_range)
     logger.info(f"Parameter sweep: {total_combos} combinations")
 
     for ht in hurst_range:
         for pl in phase_long_range:
             for ps in phase_short_range:
                 for tm in trailing_multiplier_range:
-                    ltf_chop_threshold = 50 - 118 * (ht - 0.5)
-
-                    result = run_backtest(
-                        close, high=high, low=low, atr=atr, phase_array=phase_array, hurst_value=hurst_value,
-                        ltf_metric=ltf_metric, htf_metric=htf_metric, volatility_zscore=volatility_zscore,
-                        htf_direction=htf_direction, rank_metric=rank_metric,
-                        hurst_threshold=ht,
-                        ltf_threshold=ltf_chop_threshold,
-                        htf_threshold=50, # change from 38.2 to catch the trend beginning earlier 
-                        trailing_multiplier=tm,
-                        breakeven_threshold=breakeven_threshold,
-                        max_concurrent_trades=max_concurrent_trades,
-                        risk_per_trade=risk_per_trade,
-                        initial_capital=initial_capital,
-                        commission=commission,
-                        phase_long_center=pl,
-                        phase_short_center=ps,
-                        freq=freq,
-                    )
-
-                    row = {
-                        "hurst_threshold": ht,
-                        "phase_long": pl,
-                        "phase_short": ps,
-                        "trailing_multiplier": tm,
-                        "total_return": result["total_return"] if result else 0.0,
-                        "sharpe_ratio": result["sharpe_ratio"] if result else 0.0,
-                        "max_drawdown": result["max_drawdown"] if result else 0.0,
+                    for mf in macro_filter_type_range:
+                        ltf_chop_threshold = 50 - 118 * (ht - 0.5)
+    
+                        result = run_backtest(
+                            close, high=high, low=low, atr=atr, phase_array=phase_array, hurst_value=hurst_value,
+                            ltf_metric=ltf_metric, htf_metric=htf_metric, volatility_zscore=volatility_zscore,
+                            htf_direction=htf_direction, rank_metric=rank_metric,
+                            hurst_threshold=ht,
+                            ltf_threshold=ltf_chop_threshold,
+                            htf_threshold=45, # change from 38.2 to catch the trend beginning earlier 
+                            macro_filter_type=mf,
+                            trailing_multiplier=tm,
+                            breakeven_threshold=breakeven_threshold,
+                            max_concurrent_trades=max_concurrent_trades,
+                            risk_per_trade=risk_per_trade,
+                            initial_capital=initial_capital,
+                            commission=commission,
+                            phase_long_center=pl,
+                            phase_short_center=ps,
+                            freq=freq,
+                        )
+    
+                        row = {
+                            "hurst_threshold": ht,
+                            "phase_long": pl,
+                            "phase_short": ps,
+                            "trailing_multiplier": tm,
+                            "macro_filter_type": mf,
+                            "total_return": result["total_return"] if result else 0.0,
+                            "sharpe_ratio": result["sharpe_ratio"] if result else 0.0,
+                            "max_drawdown": result["max_drawdown"] if result else 0.0,
                         "win_rate": result["win_rate"] if result else 0.0,
                         "profit_factor": result["profit_factor"] if result else 0.0,
                         "total_trades": result["total_trades"] if result else 0,
