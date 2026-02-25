@@ -110,7 +110,7 @@ async def run_bulk_backtest(
             }).dropna()
             
             if not daily_df.empty:
-                daily_chop = calculate_chop(daily_df)
+                daily_chop = calculate_chop(daily_df, period=30)
                 safe_daily_chop = daily_chop.shift(1)
                 
                 daily_sma = daily_df["close_price"].rolling(window=50).mean()

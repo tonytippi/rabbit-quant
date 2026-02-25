@@ -119,7 +119,8 @@ def simulate_portfolio_nb(
                     continue
                     
                 phase = phase_array[i, a] % (2.0 * np.pi)
-                valid = (htf_metric[i, a] < htf_threshold) and (ltf_metric[i, a] > ltf_threshold) and (volatility_zscore[i, a] < veto_threshold) and (hurst_value[i, a] > hurst_threshold)
+                # valid = (htf_metric[i, a] < htf_threshold) and (ltf_metric[i, a] > ltf_threshold) and (volatility_zscore[i, a] < veto_threshold) and (hurst_value[i, a] > hurst_threshold)
+                valid = (htf_metric[i, a] < htf_threshold) and (ltf_metric[i, a] > ltf_threshold) and (volatility_zscore[i, a] < veto_threshold)
                 if not valid:
                     continue
                     
@@ -382,7 +383,7 @@ def run_parameter_sweep(
                         htf_direction=htf_direction, rank_metric=rank_metric,
                         hurst_threshold=ht,
                         ltf_threshold=ltf_chop_threshold,
-                        htf_threshold=38.2, 
+                        htf_threshold=50, # change from 38.2 to catch the trend beginning earlier 
                         trailing_multiplier=tm,
                         breakeven_threshold=breakeven_threshold,
                         max_concurrent_trades=max_concurrent_trades,
