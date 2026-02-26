@@ -5,12 +5,12 @@ Supports switching backend based on configuration.
 """
 
 from pathlib import Path
-from typing import Union, Any
+from typing import Union
 
 import duckdb
 import pandas as pd
 from loguru import logger
-from sqlalchemy import create_engine, text, Table, Column, String, Float, DateTime, MetaData, UniqueConstraint, Boolean
+from sqlalchemy import Boolean, Column, DateTime, Float, MetaData, String, Table, UniqueConstraint, create_engine
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import Connection as AlchemyConnection
 
@@ -131,19 +131,19 @@ def _resolve_db_path(settings: AppSettings) -> Path:
 
 def get_connection(settings: AppSettings, read_only: bool = False) -> DBConnection:
     """Get a database connection (DuckDB or Postgres)."""
-    
+
     if settings.use_postgres:
         # PostgreSQL Connection
         try:
             engine = create_engine(settings.database_url)
             conn = engine.connect()
-            
+
             # Ensure schema exists (if not read_only, though 'create_all' is safe)
             if not read_only:
                 metadata.create_all(conn)
                 # Init portfolio if empty
                 _init_postgres_portfolio(conn)
-                
+
             logger.debug(f"Postgres connected: {settings.database_host}")
             return conn
         except Exception as e:
@@ -174,12 +174,12 @@ def _init_duckdb_portfolio(conn: duckdb.DuckDBPyConnection) -> None:
 
 def _init_postgres_portfolio(conn: AlchemyConnection) -> None:
     """Initialize portfolio state if empty."""
-    from sqlalchemy import select, insert, func
+    from sqlalchemy import func, insert, select
     res = conn.execute(select(func.count()).select_from(portfolio_table)).scalar()
     if res == 0:
         conn.execute(insert(portfolio_table).values(
-            id="main", 
-            current_balance=10000.0, 
+            id="main",
+            current_balance=10000.0,
             initial_balance=10000.0,
             updated_at=pd.Timestamp.utcnow()
         ))
@@ -231,12 +231,12 @@ def upsert_ohlcv(conn: DBConnection, df: pd.DataFrame) -> int:
             # DuckDB Path
             conn.execute(DUCKDB_UPSERT_SQL)
             logger.info(f"Upserted {row_count} rows (DuckDB) for {df_stage['symbol'].iloc[0]}")
-            
+
         else:
             # Postgres Path (SQLAlchemy)
             # Convert DataFrame to list of dicts
             records = df_stage.to_dict(orient="records")
-            
+
             # Postgres Insert with ON CONFLICT
             stmt = pg_insert(ohlcv_table).values(records)
             stmt = stmt.on_conflict_do_update(
@@ -275,12 +275,12 @@ def query_ohlcv(
             if limit:
                 query += " DESC LIMIT ?"
                 params.append(limit)
-            
+
             result = conn.execute(query, params).fetchdf()
             if limit:
                 result = result.sort_values("timestamp").reset_index(drop=True)
             return result
-            
+
         else:
             # Postgres (SQLAlchemy)
             # We construct a select statement
@@ -288,24 +288,24 @@ def query_ohlcv(
                 ohlcv_table.c.symbol == symbol,
                 ohlcv_table.c.timeframe == timeframe
             ).order_by(ohlcv_table.c.timestamp)
-            
-            # Since we can't easily do 'DESC LIMIT' then resort in pure SQL without subquery, 
+
+            # Since we can't easily do 'DESC LIMIT' then resort in pure SQL without subquery,
             # we'll fetch all or handle limit efficiently.
             # Postgres optimization: if limit is small, maybe order desc limit X?
-            
+
             if limit:
                 # Fetch recent: Order DESC, Limit X
                 query = ohlcv_table.select().where(
                     ohlcv_table.c.symbol == symbol,
                     ohlcv_table.c.timeframe == timeframe
                 ).order_by(ohlcv_table.c.timestamp.desc()).limit(limit)
-            
+
             result = pd.read_sql(query, conn)
-            
+
             if limit:
                 # Sort back to ASC
                 result = result.sort_values("timestamp").reset_index(drop=True)
-                
+
             return result
 
     except Exception as e:
@@ -355,9 +355,9 @@ def count_rows(conn: DBConnection, symbol: str | None = None) -> int:
                 stmt = select(func.count()).where(ohlcv_table.c.symbol == symbol)
             else:
                 stmt = select(func.count()).select_from(ohlcv_table)
-            
+
             return conn.scalar(stmt) or 0
-            
+
     except Exception as e:
         logger.error(f"Failed to count rows: {e}")
         return 0

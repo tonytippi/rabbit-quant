@@ -42,7 +42,7 @@ class AppSettings(BaseSettings):
 
     # Database
     duckdb_path: str = Field(default="data/rabbit.duckdb", description="Path to DuckDB database file")
-    
+
     # Postgres (Optional)
     database_host: str = Field(default="", description="Postgres Host")
     database_port: int = Field(default=5432, description="Postgres Port")

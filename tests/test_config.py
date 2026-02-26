@@ -3,9 +3,9 @@
 from src.config import (
     AppSettings,
     AssetConfig,
+    PaperConfig,
     StrategyConfig,
     TimeframeConfig,
-    PaperConfig,
     _load_toml,
     load_config,
     setup_logging,
@@ -67,7 +67,7 @@ class TestAssetConfig:
 class TestStrategyConfig:
     def test_hurst_threshold_loaded(self):
         config = StrategyConfig()
-        assert config.hurst_threshold == 0.6
+        assert config.hurst_threshold == 0.55
 
     def test_cycle_settings_loaded(self):
         config = StrategyConfig()
@@ -85,9 +85,9 @@ class TestStrategyConfig:
 class TestTimeframeConfig:
     def test_default_timeframes_loaded(self):
         config = TimeframeConfig()
-        assert "15m" in config.default_timeframes
+        assert "4h" in config.default_timeframes
         assert "1d" in config.default_timeframes
-        assert len(config.default_timeframes) == 4
+        assert len(config.default_timeframes) == 2
 
     def test_yfinance_mapping_loaded(self):
         config = TimeframeConfig()

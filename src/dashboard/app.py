@@ -64,8 +64,6 @@ def _compute_scanner_data(db_path: str) -> pd.DataFrame:
     """Compute scanner data from DB (no Streamlit cache — used by scheduler)."""
     import duckdb
 
-    from src.signals.cycles import detect_dominant_cycle_filtered
-    from src.signals.fractals import calculate_hurst
     from src.signals.filters import generate_signal
 
     conn = duckdb.connect(db_path, read_only=True)
@@ -88,7 +86,7 @@ def _compute_scanner_data(db_path: str) -> pd.DataFrame:
 
             if df.empty or len(df) < 20:
                 continue
-            
+
             # Fetch HTF data (assume '1d' is HTF for MTF logic)
             df_htf = conn.execute(
                 "SELECT * FROM ohlcv WHERE symbol = ? AND timeframe = '1d' ORDER BY timestamp",
@@ -97,7 +95,7 @@ def _compute_scanner_data(db_path: str) -> pd.DataFrame:
 
             # Generate full signal dict with MTF
             sig_data = generate_signal(df, sym, tf, hurst_threshold=0.6, lowpass_cutoff=0.1, htf_df=df_htf)
-            
+
             if sig_data is None:
                 continue
 
@@ -185,6 +183,7 @@ def _render_scanner(scanner_df: pd.DataFrame) -> tuple[str, str] | None:
 def _render_chart(db_path: str, symbol: str, timeframe: str) -> None:
     """Render candlestick chart with overlays for selected symbol."""
     import duckdb
+
     from src.dashboard.charts import create_candlestick_chart
     from src.signals.filters import generate_signal
 
@@ -269,15 +268,15 @@ def main():
     with tab_scanner:
         # --- Sidebar Filters ---
         st.sidebar.header("Filters")
-        
+
         # Hurst Filter
         min_hurst = st.sidebar.slider("Min Hurst", 0.5, 1.0, 0.6, 0.05)
-        
+
         # Direction Filter
         directions = st.sidebar.multiselect(
             "Signal Direction", ["LONG", "SHORT", "NEUTRAL"], ["LONG", "SHORT"]
         )
-        
+
         # Timeframe Filter
         all_tfs = scanner_df["Timeframe"].unique().tolist() if not scanner_df.empty else []
         selected_tfs = st.sidebar.multiselect("Timeframes", all_tfs, all_tfs)
@@ -325,17 +324,16 @@ def main():
 
 def _render_paper_trading(db_path: str) -> None:
     """Render Paper Trading dashboard tab."""
-    import duckdb
     from src.config import load_config
     from src.data_loader import get_connection, reset_portfolio
-    
+
     settings, _, _, _ = load_config()
-    
+
     st.header("Live Paper Trading Portfolio")
-    
+
     # Connect
     conn = get_connection(settings, read_only=True)
-    
+
     try:
         # Fetch Balance
         if settings.use_postgres:
@@ -344,22 +342,22 @@ def _render_paper_trading(db_path: str) -> None:
         else:
             balance_df = conn.execute("SELECT * FROM portfolio_state").fetchdf()
             trades_df = conn.execute("SELECT * FROM paper_trades ORDER BY entry_time DESC").fetchdf()
-            
+
         if balance_df.empty:
             st.warning("Portfolio not initialized.")
             return
 
         current_bal = balance_df["current_balance"].iloc[0]
         init_bal = balance_df["initial_balance"].iloc[0]
-        
+
         # Calculate Trade Metrics
         if not trades_df.empty:
             trades_df["Amount"] = trades_df["entry_price"] * trades_df["quantity"]
-        
+
         # Active Stats & Live Prices
         active = trades_df[trades_df["status"] == "OPEN"].copy()
         invested_market_value = 0.0
-        
+
         if not active.empty:
             current_prices = {}
             for symbol in active["symbol"].unique():
@@ -367,36 +365,36 @@ def _render_paper_trading(db_path: str) -> None:
                 p_df = pd.read_sql(f"SELECT close_price FROM ohlcv WHERE symbol = '{symbol}' ORDER BY timestamp DESC LIMIT 1", conn)
                 if not p_df.empty:
                     current_prices[symbol] = float(p_df["close_price"].iloc[0])
-            
+
             active["Current Price"] = active["symbol"].map(current_prices)
-            
+
             def calc_unrealized(row):
                 if pd.isna(row["Current Price"]): return 0.0
                 if row["side"] == "LONG":
                     return (row["Current Price"] - row["entry_price"]) * row["quantity"]
                 else:
                     return (row["entry_price"] - row["Current Price"]) * row["quantity"]
-            
+
             active["PnL"] = active.apply(calc_unrealized, axis=1)
             invested_market_value = (active["quantity"] * active["Current Price"]).sum()
 
         total_equity = current_bal + invested_market_value
         total_pnl = total_equity - init_bal
         pnl_pct = (total_pnl / init_bal) * 100
-        
+
         # Metrics
         m1, m2, m3 = st.columns(3)
         m1.metric("Total Equity", f"${total_equity:,.2f}", f"{pnl_pct:.2f}%")
         m2.metric("Available Cash", f"${current_bal:,.2f}")
         m3.metric("Position Value", f"${invested_market_value:,.2f}")
-        
+
         # Active Positions
         st.subheader("Active Positions")
         if not active.empty:
             def style_pnl(val):
                 color = "#26a69a" if val >= 0 else "#ef5350"
                 return f"color: {color}; font-weight: bold"
-            
+
             # Make sure we select the new columns if they exist
             cols_to_show = ["symbol", "side", "entry_price", "Current Price", "PnL", "tp", "sl", "ltf_hurst", "htf_hurst", "veto_z", "status", "entry_time"]
             existing_cols = [c for c in cols_to_show if c in active.columns]
@@ -404,7 +402,7 @@ def _render_paper_trading(db_path: str) -> None:
             st.dataframe(styled_active, use_container_width=True)
         else:
             st.info("No active positions.")
-            
+
         # Closed History
         st.subheader("Trade History")
         closed = trades_df[trades_df["status"] == "CLOSED"]
@@ -412,7 +410,7 @@ def _render_paper_trading(db_path: str) -> None:
             cols_to_show_closed = ["symbol", "side", "entry_price", "exit_price", "pnl", "ltf_hurst", "htf_hurst", "veto_z", "entry_time", "exit_time"]
             existing_cols_closed = [c for c in cols_to_show_closed if c in closed.columns]
             st.dataframe(closed[existing_cols_closed], use_container_width=True)
-            
+
         # Reset Button
         st.divider()
         if st.button("Reset Portfolio (Clear Data)", type="primary"):
@@ -424,7 +422,7 @@ def _render_paper_trading(db_path: str) -> None:
             st.success("Portfolio reset! Refreshing...")
             time.sleep(1)
             st.rerun()
-            
+
     except Exception as e:
         st.error(f"Error loading portfolio: {e}")
     finally:
@@ -437,7 +435,7 @@ def _render_paper_trading(db_path: str) -> None:
 def _render_heatmap(df: pd.DataFrame, selected_tfs: list[str]) -> None:
     """Render a multi-timeframe confluence heatmap."""
     st.subheader("Confluence Heatmap")
-    
+
     if df.empty:
         st.info("No data for heatmap.")
         return
@@ -445,27 +443,27 @@ def _render_heatmap(df: pd.DataFrame, selected_tfs: list[str]) -> None:
     # Pivot: Index=Symbol, Columns=Timeframe, Values=Signal
     # We filter only by selected timeframes for the columns
     df_filtered = df[df["Timeframe"].isin(selected_tfs)]
-    
+
     if df_filtered.empty:
         st.info("No data matches the timeframe filter.")
         return
 
     heatmap = df_filtered.pivot(index="Symbol", columns="Timeframe", values="Signal")
-    
+
     # Sort columns chronologically
     TIMEFRAME_ORDER = ["15m", "1h", "4h", "1d"]
-    
+
     # Get available columns that are also in our known order
     sorted_cols = [tf for tf in TIMEFRAME_ORDER if tf in heatmap.columns]
-    
+
     # Append any unknown timeframes at the end (just in case)
     remaining_cols = [c for c in heatmap.columns if c not in sorted_cols]
-    
+
     heatmap = heatmap[sorted_cols + remaining_cols]
-    
+
     # --- Action & Score Calculation ---
     weights = {'1d': 3.0, '4h': 2.0, '1h': 1.0, '15m': 0.5}
-    
+
     def calculate_action(row):
         score = 0.0
         for tf, weight in weights.items():
@@ -475,7 +473,7 @@ def _render_heatmap(df: pd.DataFrame, selected_tfs: list[str]) -> None:
                     score += weight
                 elif val == "SHORT":
                     score -= weight
-        
+
         if score >= 4.0: return "STRONG BUY", score
         if score >= 2.0: return "BUY", score
         if score <= -4.0: return "STRONG SELL", score
@@ -486,7 +484,7 @@ def _render_heatmap(df: pd.DataFrame, selected_tfs: list[str]) -> None:
     results = heatmap.apply(calculate_action, axis=1)
     heatmap.insert(0, "Action", results.apply(lambda x: x[0]))
     heatmap["Score"] = results.apply(lambda x: x[1])
-    
+
     # Sort by Score Descending
     heatmap = heatmap.sort_values("Score", ascending=False)
 
@@ -498,7 +496,7 @@ def _render_heatmap(df: pd.DataFrame, selected_tfs: list[str]) -> None:
             return "background-color: #ef5350; color: white; font-weight: bold"
         elif val == "NEUTRAL":
             return "color: gray"
-        
+
         # Action Styling
         if val == "STRONG BUY":
             return "background-color: #00695c; color: white; font-weight: bold" # Dark Green
@@ -510,7 +508,7 @@ def _render_heatmap(df: pd.DataFrame, selected_tfs: list[str]) -> None:
             return "background-color: #ef5350; color: white; font-weight: bold"
         if val == "WAIT":
             return "color: gray; font-style: italic"
-            
+
         return ""
 
     st.dataframe(

@@ -61,7 +61,7 @@ async def fetch_crypto_ohlcv(
             candle_limit = 1000000  # Large limit to fetch all missing candles up to now
         else:
             candle_limit = TIMEFRAME_CANDLE_LIMIT.get(timeframe, 1000)
-            
+
             # Calculate start time (since) to fetch historical data
             # Mapping timeframe to milliseconds
             tf_ms = {

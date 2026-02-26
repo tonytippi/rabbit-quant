@@ -5,14 +5,14 @@ and tracking PnL.
 """
 
 from typing import Union
+
+import duckdb
 import pandas as pd
 from loguru import logger
-import duckdb
-from sqlalchemy import text, insert, update, select
-from sqlalchemy.engine import Connection as AlchemyConnection
+from sqlalchemy import insert, select, update
 
-from src.data_loader import DBConnection, portfolio_table, trades_table
 from src.config import PaperConfig
+from src.data_loader import DBConnection, portfolio_table, trades_table
 
 
 class PaperTrader:
@@ -58,24 +58,24 @@ class PaperTrader:
         """Open a new paper trade based on a signal."""
         from src.config import StrategyConfig
         strat_config = StrategyConfig()
-        
+
         symbol = signal["symbol"]
         tf = signal["timeframe"]
         side = signal["signal"].upper() # LONG/SHORT
         price = float(signal.get("price", 0.0) or signal.get("close_price", 0.0) or signal.get("last_price", 0.0) or 0.0) # Ensure float
         if price == 0.0:
             price = float(signal.get("current_price", 1.0))
-        
+
         atr = float(signal.get("atr", 0.0))
         tp = float(signal["tp"])
         sl = float(signal["sl"])
-        
+
         ltf_hurst = signal.get("hurst_value", 0.0)
         htf_hurst = signal.get("htf_hurst_value")
         veto_z = signal.get("atr_zscore", 0.0)
 
         balance = self._get_balance()
-        
+
         # Position Sizing Logic (Refined Crypto Formula)
         if self.config.use_dynamic_sizing and atr > 0:
             # Risk Amount ($) = Account Equity * Risk_Per_Trade %
@@ -94,7 +94,7 @@ class PaperTrader:
         # Check if already open
         if self._is_position_open(symbol, tf):
             return False
-            
+
         # Check Portfolio Exposure Cap
         if self._get_open_trades_count() >= strat_config.max_concurrent_trades:
             logger.warning(f"Portfolio exposure cap reached ({strat_config.max_concurrent_trades} trades). Rejecting {symbol} signal.")
@@ -130,14 +130,14 @@ class PaperTrader:
                     INSERT INTO paper_trades (id, symbol, timeframe, side, entry_price, quantity, tp, sl, status, ltf_hurst, htf_hurst, veto_z, highest_price, lowest_price, is_breakeven, entry_time)
                     VALUES (nextval('seq_paper_trades_id'), ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, FALSE, CURRENT_TIMESTAMP)
                 """, [symbol, tf, side, price, quantity, tp, sl, ltf_hurst, htf_hurst, veto_z, price, price])
-            
+
             logger.info(f"Opened {side} trade: {symbol} @ {price} (Qty: {quantity:.4f})")
-            
+
             # Deduct used capital (approximate for paper tracking)
             # In paper trading, we usually track 'invested market value' rather than deducting from cash,
             # but for consistency with existing code:
             self._update_balance(-(quantity * price))
-            
+
             return True
 
         except Exception as e:
@@ -182,9 +182,9 @@ class PaperTrader:
         from src.config import StrategyConfig
         from src.data_loader import query_ohlcv
         from src.signals.filters import calculate_atr_scalar
-        
+
         strat_config = StrategyConfig()
-        
+
         try:
             # Fetch open trades
             if self.is_postgres:
@@ -209,7 +209,7 @@ class PaperTrader:
                 qty = trade["quantity"]
                 entry = trade["entry_price"]
                 trade_id = trade["id"]
-                
+
                 highest_price = trade.get("highest_price", entry)
                 lowest_price = trade.get("lowest_price", entry)
                 is_breakeven = trade.get("is_breakeven", False)
@@ -217,7 +217,7 @@ class PaperTrader:
                 exit_price = None
                 pnl = 0.0
                 reason = ""
-                
+
                 # Dynamic ATR Recalculation for Trailing Stop
                 # Fetch recent candles to calculate fresh ATR
                 df_recent = query_ohlcv(self.conn, symbol, tf, limit=30)
@@ -227,7 +227,7 @@ class PaperTrader:
                 if side == "LONG":
                     if curr_price > highest_price:
                         highest_price = curr_price
-                    
+
                     # Breakeven Ratchet
                     if not is_breakeven and current_atr > 0:
                         if curr_price >= entry + (current_atr * strat_config.breakeven_atr_threshold):
@@ -237,7 +237,7 @@ class PaperTrader:
                                 sl = be_level
                                 is_breakeven = True
                                 logger.info(f"LONG {symbol} hit breakeven threshold. Stop ratcheted to {sl:.2f}")
-                    
+
                     # Trailing Stop Update
                     if current_atr > 0:
                         new_trailing_sl = highest_price - (current_atr * strat_config.trailing_atr_multiplier)
@@ -252,11 +252,11 @@ class PaperTrader:
                     elif curr_price <= sl:
                         exit_price = curr_price
                         reason = "SL/Trailing"
-                        
+
                 elif side == "SHORT":
                     if curr_price < lowest_price:
                         lowest_price = curr_price
-                        
+
                     # Breakeven Ratchet
                     if not is_breakeven and current_atr > 0:
                         if curr_price <= entry - (current_atr * strat_config.breakeven_atr_threshold):
@@ -266,7 +266,7 @@ class PaperTrader:
                                 sl = be_level
                                 is_breakeven = True
                                 logger.info(f"SHORT {symbol} hit breakeven threshold. Stop ratcheted to {sl:.2f}")
-                            
+
                     # Trailing Stop Update
                     if current_atr > 0:
                         new_trailing_sl = lowest_price + (current_atr * strat_config.trailing_atr_multiplier)
@@ -330,10 +330,10 @@ class PaperTrader:
                 trade = self.conn.execute("SELECT quantity, entry_price FROM paper_trades WHERE id = ?", [trade_id]).fetchone()
                 qty = float(trade[0])
                 entry = float(trade[1])
-            
+
             used_capital = qty * entry
             logger.info(f"Closing trade {trade_id} ({reason}) @ {price} | PnL: {pnl:.2f}")
-            
+
             if self.is_postgres:
                 stmt = update(trades_table).where(trades_table.c.id == trade_id).values(
                     status="CLOSED",
@@ -348,7 +348,7 @@ class PaperTrader:
                     "UPDATE paper_trades SET status = 'CLOSED', exit_price = ?, pnl = ?, exit_time = CURRENT_TIMESTAMP WHERE id = ?",
                     [price, pnl, trade_id]
                 )
-            
+
             # Update Portfolio Balance (Return actual used capital + PnL)
             self._update_balance(used_capital + pnl)
 

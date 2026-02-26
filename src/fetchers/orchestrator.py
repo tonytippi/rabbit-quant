@@ -8,11 +8,10 @@ import asyncio
 import time
 from dataclasses import dataclass, field
 
-import duckdb
 from loguru import logger
 
 from src.config import AssetConfig, TimeframeConfig
-from src.data_loader import upsert_ohlcv, get_latest_timestamp, DBConnection
+from src.data_loader import DBConnection, get_latest_timestamp, upsert_ohlcv
 from src.fetchers.crypto_fetcher import fetch_crypto_ohlcv
 from src.fetchers.stock_fetcher import fetch_stock_ohlcv
 

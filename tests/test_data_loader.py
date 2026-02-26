@@ -8,16 +8,19 @@ from src.data_loader import (
     OHLCV_COLUMNS,
     count_rows,
     get_connection,
+    get_latest_timestamp,
     query_ohlcv,
     upsert_ohlcv,
-    get_latest_timestamp,
 )
 
 
 @pytest.fixture
 def db_conn(tmp_path):
     """Create an in-memory DuckDB connection with schema initialized."""
-    settings = AppSettings(duckdb_path=str(tmp_path / "test.duckdb"), use_postgres=False)
+    settings = AppSettings(
+        duckdb_path=str(tmp_path / "test.duckdb"),
+        database_host="", database_name="", database_user=""
+    )
     conn = get_connection(settings)
     yield conn
     conn.close()
@@ -40,7 +43,10 @@ def sample_ohlcv_df():
 
 class TestGetConnection:
     def test_creates_database_file(self, tmp_path):
-        settings = AppSettings(duckdb_path=str(tmp_path / "new.duckdb"), use_postgres=False)
+        settings = AppSettings(
+            duckdb_path=str(tmp_path / "new.duckdb"),
+            database_host="", database_name="", database_user=""
+        )
         conn = get_connection(settings)
         assert (tmp_path / "new.duckdb").exists()
         conn.close()
@@ -56,14 +62,20 @@ class TestGetConnection:
             assert expected in col_names
 
     def test_creates_parent_directories(self, tmp_path):
-        settings = AppSettings(duckdb_path=str(tmp_path / "subdir" / "deep" / "test.duckdb"), use_postgres=False)
+        settings = AppSettings(
+            duckdb_path=str(tmp_path / "subdir" / "deep" / "test.duckdb"),
+            database_host="", database_name="", database_user=""
+        )
         conn = get_connection(settings)
         assert (tmp_path / "subdir" / "deep" / "test.duckdb").exists()
         conn.close()
 
     def test_idempotent_table_creation(self, tmp_path):
         """Calling get_connection twice should not fail."""
-        settings = AppSettings(duckdb_path=str(tmp_path / "test.duckdb"), use_postgres=False)
+        settings = AppSettings(
+            duckdb_path=str(tmp_path / "test.duckdb"),
+            database_host="", database_name="", database_user=""
+        )
         conn1 = get_connection(settings)
         conn1.close()
         conn2 = get_connection(settings)

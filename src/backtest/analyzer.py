@@ -68,7 +68,7 @@ def export_trade_log_csv(portfolio, output_path: str, symbol: str = "") -> str |
     """
     try:
         log = extract_trade_log(portfolio)
-        
+
         # If the log only has one generic symbol or is empty, we can label it
         if symbol and (log.empty or (len(log['symbol'].unique()) == 1 and log['symbol'].iloc[0] == 0)):
              log['symbol'] = symbol
@@ -167,12 +167,12 @@ def update_strategy_config(recommendation: dict) -> bool:
         lines = content.split("\n")
         updated_lines = []
         current_section = ""
-        
+
         for line in lines:
             trimmed = line.strip()
             if trimmed.startswith("[") and trimmed.endswith("]"):
                 current_section = trimmed
-            
+
             if current_section == "[hurst]" and trimmed.startswith("threshold"):
                 updated_lines.append(f"threshold = {recommendation['hurst_threshold']}")
             elif current_section == "[risk]" and trimmed.startswith("trailing_atr_multiplier"):

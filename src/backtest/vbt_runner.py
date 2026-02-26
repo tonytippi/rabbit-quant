@@ -9,11 +9,11 @@ Architecture boundary: reads signal output (dicts of numpy arrays),
 orchestrates VectorBT. Does NOT own data fetching or signal computation.
 """
 
+import numba
 import numpy as np
 import pandas as pd
 import vectorbt as vbt
 from loguru import logger
-import numba
 
 
 @numba.njit(cache=True)
@@ -43,12 +43,12 @@ def simulate_portfolio_nb(
 ) -> tuple:
     """Numba-compiled Time-First loop for Portfolio Execution and Signal Ranking."""
     n_time, n_assets = close.shape
-    
+
     long_entries = np.zeros((n_time, n_assets), dtype=np.bool_)
     long_exits = np.zeros((n_time, n_assets), dtype=np.bool_)
     short_entries = np.zeros((n_time, n_assets), dtype=np.bool_)
     short_exits = np.zeros((n_time, n_assets), dtype=np.bool_)
-    
+
     in_position_long = np.zeros(n_assets, dtype=np.bool_)
     in_position_short = np.zeros(n_assets, dtype=np.bool_)
     entry_price = np.zeros(n_assets, dtype=np.float64)
@@ -56,21 +56,21 @@ def simulate_portfolio_nb(
     lowest_price = np.zeros(n_assets, dtype=np.float64)
     stop_loss = np.zeros(n_assets, dtype=np.float64)
     is_breakeven = np.zeros(n_assets, dtype=np.bool_)
-    
+
     open_trades_count = 0
-    
+
     for i in range(1, n_time):
         # 1. Process EXITS first to free up concurrency budget
         for a in range(n_assets):
             if in_position_long[a]:
                 if high[i, a] > highest_price[a]:
                     highest_price[a] = high[i, a]
-                
+
                 # Dynamic ATR Trailing (Truly dynamic - uses current ATR)
                 current_trailing = highest_price[a] - (atr[i, a] * trailing_multiplier)
                 if current_trailing > stop_loss[a]:
                     stop_loss[a] = current_trailing
-                
+
                 # Breakeven Ratchet
                 if not is_breakeven[a]:
                     if high[i, a] >= entry_price[a] + (atr[i, a] * breakeven_threshold):
@@ -79,7 +79,7 @@ def simulate_portfolio_nb(
                         if be_level > stop_loss[a]:
                             stop_loss[a] = be_level
                             is_breakeven[a] = True
-                            
+
                 # Check Exit
                 if close[i, a] <= stop_loss[a]:
                     long_exits[i, a] = True
@@ -89,12 +89,12 @@ def simulate_portfolio_nb(
             elif in_position_short[a]:
                 if low[i, a] < lowest_price[a]:
                     lowest_price[a] = low[i, a]
-                
+
                 # Dynamic ATR Trailing
                 current_trailing = lowest_price[a] + (atr[i, a] * trailing_multiplier)
                 if current_trailing < stop_loss[a]:
                     stop_loss[a] = current_trailing
-                    
+
                 # Breakeven Ratchet
                 if not is_breakeven[a]:
                     if low[i, a] <= entry_price[a] - (atr[i, a] * breakeven_threshold):
@@ -102,13 +102,13 @@ def simulate_portfolio_nb(
                         if be_level < stop_loss[a]:
                             stop_loss[a] = be_level
                             is_breakeven[a] = True
-                            
+
                 # Check Exit
                 if close[i, a] >= stop_loss[a]:
                     short_exits[i, a] = True
                     in_position_short[a] = False
                     open_trades_count -= 1
-        
+
         # 2. Process ENTRIES
         if open_trades_count < max_concurrent_trades:
             # Rank candidates by Volatility-Adjusted Momentum
@@ -118,29 +118,29 @@ def simulate_portfolio_nb(
                 if in_position_long[a] or in_position_short[a] or long_exits[i, a] or short_exits[i, a]:
                     continue
 
-                phase = phase_array[i, a] % (2.0 * np.pi)                
+                phase = phase_array[i, a] % (2.0 * np.pi)
                 # Check Veto first
                 if volatility_zscore[i, a] >= veto_threshold:
                     continue
-                    
+
                 # Evaluate macro filters based on macro_filter_type
                 # 0 = chop, 1 = hurst, 2 = both
                 valid = False
                 chop_valid = (htf_metric[i, a] < htf_threshold) and (ltf_metric[i, a] > ltf_threshold)
                 hurst_valid = (hurst_value[i, a] > hurst_threshold)
-                
+
                 if macro_filter_type == 0:
                     valid = chop_valid
                 elif macro_filter_type == 1:
                     valid = hurst_valid
                 else: # 2 = both
                     valid = chop_valid and hurst_valid
-                    
+
                 if not valid:
                     continue
-                    
+
                 prev_phase = phase_array[i-1, a] % (2.0 * np.pi)
-                
+
                 if htf_direction[i, a] >= 0:
                     if abs(phase - phase_long_center) < phase_tolerance and not (abs(prev_phase - phase_long_center) < phase_tolerance):
                         scores[a] = rank_metric[i, a]
@@ -149,19 +149,19 @@ def simulate_portfolio_nb(
                     if abs(phase - phase_short_center) < phase_tolerance and not (abs(prev_phase - phase_short_center) < phase_tolerance):
                         scores[a] = -rank_metric[i, a]
                         dirs[a] = -1
-            
+
             # Sort by Momentum Score descending
             sorted_indices = np.argsort(scores)[::-1]
-            
+
             for a in sorted_indices:
                 if scores[a] <= -1e9 or open_trades_count >= max_concurrent_trades:
                     break
-                
+
                 entry_price[a] = close[i, a]
                 highest_price[a] = high[i, a]
                 lowest_price[a] = low[i, a]
                 is_breakeven[a] = False
-                
+
                 if dirs[a] == 1:
                     long_entries[i, a] = True
                     in_position_long[a] = True
@@ -170,9 +170,9 @@ def simulate_portfolio_nb(
                     short_entries[i, a] = True
                     in_position_short[a] = True
                     stop_loss[a] = entry_price[a] + (atr[i, a] * trailing_multiplier)
-                    
+
                 open_trades_count += 1
-                
+
     return long_entries, long_exits, short_entries, short_exits
 
 
@@ -187,8 +187,8 @@ def build_entries_exits(
     volatility_zscore: np.ndarray | None = None,
     htf_direction: np.ndarray | None = None,
     rank_metric: np.ndarray | None = None,
-    htf_threshold: float = 45, 
-    ltf_threshold: float = 61.8, 
+    htf_threshold: float = 45,
+    ltf_threshold: float = 61.8,
     veto_threshold: float = 3.0,
     trailing_multiplier: float = 2.0,
     breakeven_threshold: float = 1.0,
@@ -196,15 +196,15 @@ def build_entries_exits(
     hurst_value: np.ndarray | float = 0.6,
     hurst_threshold: float = 0.6,
     macro_filter_type: str = "both",
-    phase_long_center: float = 4.712,  
-    phase_short_center: float = 1.571,  
-    phase_tolerance: float = 0.785,  
+    phase_long_center: float = 4.712,
+    phase_short_center: float = 1.571,
+    phase_tolerance: float = 0.785,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Build long/short entry and exit boolean arrays from cycle phase + MTF metrics.
     Handles 1D (single asset) and 2D (multi-asset) inputs.
     """
     is_1d = close.ndim == 1
-    
+
     # Force 2D for Numba processing
     def to_2d(arr):
         if arr is None:
@@ -215,13 +215,13 @@ def build_entries_exits(
     h_2d = to_2d(high).astype(np.float64) if high is not None else c_2d.copy()
     l_2d = to_2d(low).astype(np.float64) if low is not None else c_2d.copy()
     a_2d = to_2d(atr).astype(np.float64) if atr is not None else np.zeros_like(c_2d)
-    
+
     if phase_array is None:
         empty = np.zeros_like(c_2d, dtype=bool)
         return (empty.flatten(), empty.flatten(), empty.flatten(), empty.flatten()) if is_1d else (empty, empty, empty, empty)
-        
+
     p_2d = to_2d(phase_array).astype(np.float64)
-    
+
     # Fill missing metrics with safe defaults if not provided
     ltf_m = to_2d(ltf_metric).astype(np.float64) if ltf_metric is not None else np.full_like(c_2d, 100.0)
     htf_m = to_2d(htf_metric).astype(np.float64) if htf_metric is not None else np.full_like(c_2d, 0.0)
@@ -233,7 +233,7 @@ def build_entries_exits(
         hv_2d = np.full_like(c_2d, float(hurst_value))
     else:
         hv_2d = to_2d(hurst_value).astype(np.float64)
-        
+
     filter_type_map = {"chop": 0, "hurst": 1, "both": 2}
     mf_type = filter_type_map.get(macro_filter_type, 2)
 
@@ -280,13 +280,13 @@ def run_backtest(
 ) -> dict | None:
     """Run a single backtest with given parameters (1D or 2D)."""
     try:
-        c_val = close.values
-        h_val = high.values if high is not None else None
-        l_val = low.values if low is not None else None
-        a_val = atr.values if atr is not None else None
+        c_val = close.values if hasattr(close, "values") else np.asarray(close)
+        h_val = high.values if hasattr(high, "values") else (np.asarray(high) if high is not None else None)
+        l_val = low.values if hasattr(low, "values") else (np.asarray(low) if low is not None else None)
+        a_val = atr.values if hasattr(atr, "values") else (np.asarray(atr) if atr is not None else None)
 
         long_entries, long_exits, short_entries, short_exits = build_entries_exits(
-            c_val, 
+            c_val,
             high=h_val,
             low=l_val,
             atr=a_val,
@@ -308,17 +308,17 @@ def run_backtest(
             # THE CORRECT PERCENT SIZING FORMULA (Phase 3.5 Fix)
             # Fraction of Equity = Risk% * (Price / Distance to stop)
             # This ensures that a move of 'Distance_to_Stop' results in a 'Risk%' loss of account equity.
-            
+
             # ATR Floor to prevent infinite leverage
             min_atr = c_val * 0.002
             safe_atr = np.maximum(a_val, min_atr)
-            
+
             distance_to_stop = trailing_multiplier * safe_atr
             calculated_fraction = risk_per_trade * (c_val / distance_to_stop)
-            
+
             # Cap maximum leverage per trade to 1.0 (100% of equity)
             calculated_fraction = np.minimum(calculated_fraction, 1.0)
-            
+
             size[long_entries] = calculated_fraction[long_entries]
             size[short_entries] = calculated_fraction[short_entries]
 
@@ -402,14 +402,14 @@ def run_parameter_sweep(
                 for tm in trailing_multiplier_range:
                     for mf in macro_filter_type_range:
                         ltf_chop_threshold = 50 - 118 * (ht - 0.5)
-    
+
                         result = run_backtest(
                             close, high=high, low=low, atr=atr, phase_array=phase_array, hurst_value=hurst_value,
                             ltf_metric=ltf_metric, htf_metric=htf_metric, volatility_zscore=volatility_zscore,
                             htf_direction=htf_direction, rank_metric=rank_metric,
                             hurst_threshold=ht,
                             ltf_threshold=ltf_chop_threshold,
-                            htf_threshold=45, # change from 38.2 to catch the trend beginning earlier 
+                            htf_threshold=45, # change from 38.2 to catch the trend beginning earlier
                             macro_filter_type=mf,
                             trailing_multiplier=tm,
                             breakeven_threshold=breakeven_threshold,
@@ -421,7 +421,7 @@ def run_parameter_sweep(
                             phase_short_center=ps,
                             freq=freq,
                         )
-    
+
                         row = {
                             "hurst_threshold": ht,
                             "phase_long": pl,

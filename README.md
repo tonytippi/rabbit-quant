@@ -78,23 +78,23 @@ Retail traders struggle to validate strategies in real-time. Backtesting is usef
 ### Directory Structure
 
 ```text
-quant_rabbit/
+rabbit-quant/
+├── config/
+│   ├── assets.toml             # Asset watchlist (Crypto/Stocks)
+│   ├── strategy.toml           # Hurst/Cycle/Risk parameters
+│   └── timeframes.toml         # Timeframe mappings
 ├── data/
-│   ├── market_data.duckdb      # Historical OHLCV data
-│   └── paper_trades.csv        # Virtual trade log
+│   ├── rabbit.duckdb           # Historical OHLCV data
+│   └── backtest/               # Backtest reports (CSV)
 ├── src/
-│   ├── config.py               # System configuration
-│   ├── data_loader.py          # Async data fetcher
-│   ├── signals/
-│   │   ├── cycles.py           # FFT Cycle Detector
-│   │   └── fractals.py         # Hurst Exponent Calculator
-│   ├── paper/
-│   │   ├── wallet.py           # Virtual account manager
-│   │   └── broker.py           # Order execution & fees
-│   ├── dashboard/
-│   │   └── app.py              # Streamlit UI
-├── main.py                     # Application entry point
-└── requirements.txt            # Python dependencies
+│   ├── config.py               # Config loader (Pydantic)
+│   ├── data_loader.py          # Database operations
+│   ├── signals/                # Math Core (FFT, Hurst)
+│   ├── backtest/               # VectorBT Engine
+│   ├── dashboard/              # Streamlit UI
+│   └── services/               # Background scheduler
+├── main.py                     # CLI Entry point
+└── pyproject.toml              # Dependencies (uv)
 ```
 
 ---
@@ -103,7 +103,8 @@ quant_rabbit/
 
 ### Prerequisites
 
-- Python 3.10 or higher
+- Python 3.10+ (tested on 3.12)
+- [uv](https://docs.astral.sh/uv/) package manager
 - 8GB+ RAM (64GB recommended for large datasets)
 - NVMe SSD for optimal database performance
 
@@ -111,58 +112,50 @@ quant_rabbit/
 
 ```bash
 # Clone the repository
-git clone <repository-url>
-cd rabbit-quant
-
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+git clone <repository-url> && cd rabbit-quant
 
 # Install dependencies
-pip install -r requirements.txt
+uv sync
+
+# Copy environment config
+cp .env.example .env
 ```
 
 ---
 
 ## Usage
 
-### 1. Backtest Mode (Historical Analysis)
+Rabbit-Quant is operated via the `main.py` CLI. Ensure you have configured your environment variables in `.env` and assets in `config/assets.toml`.
+
+### 1. Research & Strategy Optimization (One-time)
+
+Fetch fresh data and find the best parameters for every asset in your watchlist:
 
 ```bash
-# Fetch 5 years of historical data
-python data_loader.py --symbol BTC-USD --years 5
-
-# Run backtest with custom configuration
-python main.py --backtest --config backtest_config.json
-
-# View results in dashboard
-streamlit run src/dashboard/app.py
+uv run python main.py backtest-all --type crypto --sweep --fetch
 ```
 
-### 2. Paper Trading Mode (Live Simulation)
+Run a detailed parameter sweep for a single promising asset:
 
 ```bash
-# Configure paper trading in config.py
-# Set: PAPER_TRADE_MODE = True
-# Set: INITIAL_BALANCE = 1000
-
-# Launch live paper trading
-python main.py --live
-
-# Monitor real-time PnL in dashboard
-streamlit run src/dashboard/app.py
+uv run python main.py backtest -s SOL/USDT -t 1h --sweep
 ```
 
-### Paper Trading Workflow
+### 2. Continuous Live Monitoring (Server Mode)
 
-1. System fetches latest 1-minute candle from Binance
-2. Math engine calculates Cycle Bottom + Hurst Exponent
-3. Signal detected (e.g., Hurst > 0.75)
-4. Virtual BUY executed at current close price
-5. 0.1% fee deducted from transaction
-6. Balance and holdings updated in wallet
-7. Trade logged to `data/paper_trades.csv`
-8. Dashboard displays real-time portfolio value
+Use this workflow to keep your data fresh, calculate signals in the background, and view the dashboard. **Requires PostgreSQL setup for concurrent access.**
+
+**Start the Writer Service (Terminal 1):**
+
+```bash
+uv run python main.py run-scheduler --interval 5
+```
+
+**Launch the Dashboard (Terminal 2):**
+
+```bash
+uv run python main.py dashboard
+```
 
 ---
 
@@ -244,21 +237,35 @@ Calculates the Hurst Exponent to measure market "memory" and trend persistence:
 
 ## Configuration
 
-Key settings in `src/config.py`:
+Settings are managed via TOML files in `config/` and environment variables in `.env`.
 
-```python
-# Paper Trading
-PAPER_TRADE_MODE = True
-INITIAL_BALANCE = 1000
-TRADING_FEE = 0.001  # 0.1%
+### 1. Strategy Settings (`config/strategy.toml`)
 
-# Signal Thresholds
-HURST_THRESHOLD = 0.6
-CYCLE_CONFIDENCE = 0.75
+```toml
+[hurst]
+threshold = 0.55          # Min Hurst for directional signals
 
-# Data Settings
-UPDATE_INTERVAL = 60  # seconds
-MAX_ASSETS = 50
+[filters]
+macro_filter_type = "both" # "hurst", "chop", or "both"
+htf_threshold = 50.0       # Daily Chop Threshold
+ltf_threshold = 55         # LTF Consolidation Threshold
+
+[risk]
+risk_per_trade = 0.02      # 2% Risk per trade
+max_concurrent_trades = 2  # Max open positions
+```
+
+### 2. Environment Variables (`.env`)
+
+Used for database credentials, logging levels, and notifications:
+
+```bash
+# Database (DuckDB or Postgres)
+DUCKDB_PATH="data/rabbit.duckdb"
+
+# Notifications
+TELEGRAM_BOT_TOKEN="your_token"
+TELEGRAM_CHAT_ID="your_chat_id"
 ```
 
 ---

@@ -138,17 +138,17 @@ def calculate_atr_scalar(df: pd.DataFrame, period: int = 14) -> float:
         high = df["high_price"]
         low = df["low_price"]
         close = df["close_price"]
-        
+
         # True Range
         tr1 = high - low
         tr2 = (high - close.shift()).abs()
         tr3 = (low - close.shift()).abs()
         tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        
+
         # ATR (Simple Moving Average of TR for stability, or Wilder's)
         # Using simple mean for robustness on small samples
         atr = tr.rolling(window=period).mean().iloc[-1]
-        
+
         if pd.isna(atr):
             return 0.0
         return float(atr)
@@ -160,17 +160,17 @@ def calculate_atr_zscore_series(df: pd.DataFrame, period: int = 14, z_period: in
     high = df["high_price"]
     low = df["low_price"]
     close = df["close_price"]
-    
+
     tr1 = high - low
     tr2 = (high - close.shift(1)).abs()
     tr3 = (low - close.shift(1)).abs()
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    
+
     atr = tr.rolling(window=period).mean()
-    
+
     rolling_mean = atr.rolling(window=z_period).mean()
     rolling_std = atr.rolling(window=z_period).std()
-    
+
     z_score = (atr - rolling_mean) / rolling_std
     return z_score.fillna(0.0)
 

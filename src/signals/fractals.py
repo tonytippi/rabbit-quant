@@ -206,20 +206,20 @@ def calculate_chop(df: pd.DataFrame, period: int = 14) -> pd.Series:
     high = df["high_price"]
     low = df["low_price"]
     close = df["close_price"]
-    
+
     tr1 = high - low
     tr2 = (high - close.shift(1)).abs()
     tr3 = (low - close.shift(1)).abs()
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    
+
     atr_sum = tr.rolling(window=period).sum()
     max_high = high.rolling(window=period).max()
     min_low = low.rolling(window=period).min()
-    
+
     # Avoid division by zero
     range_hl = max_high - min_low
     range_hl = range_hl.replace(0, np.nan)
-    
+
     chop = 100 * np.log10(atr_sum / range_hl) / np.log10(period)
     return chop.fillna(50.0) # 50 is neutral
 

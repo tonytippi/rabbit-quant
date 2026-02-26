@@ -66,7 +66,8 @@ class TestLoadScannerData:
         _clear_bg_cache()
         result = _load_scanner_data(db_path)
         assert "Symbol" in result.columns
-        assert "Hurst" in result.columns
+        assert "LTF Hurst" in result.columns
+        assert "HTF Hurst" in result.columns
         assert "Signal" in result.columns
         assert "Dominant Cycle" in result.columns
 
@@ -114,5 +115,5 @@ class TestLoadScannerData:
 
         _clear_bg_cache()
         result = _load_scanner_data(db_path)
-        for h in result["Hurst"]:
-            assert 0.0 <= h <= 1.0
+        for h in result["LTF Hurst"]:
+            assert 0.0 <= h <= 100.0
