@@ -24,6 +24,7 @@ MANIFEST
 *.spec
 pip-log.txt
 pip-delete-this-directory.txt
+.ruff_cache/
 
 # Virtual Environment
 venv/
@@ -75,3 +76,9 @@ data/*.duckdb.wal
 
 # uv
 uv.lock
+
+
+# AI Agents
+.claude
+.gemini
+_bmad

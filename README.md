@@ -47,6 +47,21 @@ Retail traders struggle to validate strategies in real-time. Backtesting is usef
 
 ---
 
+## Documentation
+
+### Core Documents
+- **Product Requirement Document (PRD):** [docs/prd.md](docs/prd.md)
+- **Getting Started Guide:** [docs/getting-started.md](docs/getting-started.md)
+- **Development Roadmap:** [docs/development-roadmap.md](docs/development-roadmap.md)
+- **Project Overview (PDR):** [docs/project-overview-pdr.md](docs/project-overview-pdr.md)
+
+### Planning Artifacts
+- **Architecture:** [_bmad-output/planning-artifacts/architecture.md](_bmad-output/planning-artifacts/architecture.md)
+- **Epics:** [_bmad-output/planning-artifacts/epics.md](_bmad-output/planning-artifacts/epics.md)
+- **User Stories:** [_bmad-output/planning-artifacts/stories/](_bmad-output/planning-artifacts/stories/)
+
+---
+
 ## Architecture
 
 ### Tech Stack
