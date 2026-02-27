@@ -339,6 +339,29 @@ def get_latest_timestamp(conn: DBConnection, symbol: str, timeframe: str) -> pd.
         return None
 
 
+def get_ohlcv_row_count(conn: DBConnection, symbol: str, timeframe: str) -> int:
+    """Get the number of rows for a symbol/timeframe pair."""
+    try:
+        if isinstance(conn, duckdb.DuckDBPyConnection):
+            result = conn.execute(
+                "SELECT COUNT(*) FROM ohlcv WHERE symbol = ? AND timeframe = ?",
+                [symbol, timeframe],
+            ).fetchone()
+            return int(result[0]) if result else 0
+        else:
+            from sqlalchemy import func, select
+
+            stmt = select(func.count()).select_from(ohlcv_table).where(
+                ohlcv_table.c.symbol == symbol,
+                ohlcv_table.c.timeframe == timeframe,
+            )
+            result = conn.execute(stmt).scalar()
+            return int(result or 0)
+    except Exception as e:
+        logger.error(f"Failed to get row count for {symbol}/{timeframe}: {e}")
+        return 0
+
+
 def count_rows(conn: DBConnection, symbol: str | None = None) -> int:
     """Count rows in ohlcv table."""
     try:

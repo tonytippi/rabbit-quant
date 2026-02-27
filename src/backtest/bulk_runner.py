@@ -61,6 +61,7 @@ async def run_bulk_backtest(
     start_time = time.monotonic()
 
     results = []
+    skipped_timeframes: list[tuple[str, str]] = []
     conn = get_connection(settings, read_only=True)
 
     # Group by Timeframe, NOT by Symbol
@@ -71,14 +72,23 @@ async def run_bulk_backtest(
         atr_dict, phase_dict, hurst_dict = {}, {}, {}
         ltf_dict, htf_dict, vol_z_dict, htf_dir_dict = {}, {}, {}, {}
 
+        missing_count = 0
+        insufficient_count = 0
+        cycle_fail_count = 0
+
         # 1. Fetch and calculate indicators for all symbols
         for sym in symbols:
             df = query_ohlcv(conn, sym, tf)
-            if df.empty or len(df) < strategy.hurst_min_data_points:
+            if df.empty:
+                missing_count += 1
+                continue
+            if len(df) < strategy.hurst_min_data_points:
+                insufficient_count += 1
                 continue
 
             cycle_result = detect_dominant_cycle_filtered(df, cutoff=strategy.cycle_lowpass_cutoff)
             if not cycle_result:
+                cycle_fail_count += 1
                 continue
 
             df_time = df.copy()
@@ -123,6 +133,13 @@ async def run_bulk_backtest(
                 htf_dir_dict[sym] = pd.Series(0.0, index=df_time.index)
 
         if not close_dict:
+            reason = (
+                f"no eligible symbols (missing={missing_count}, "
+                f"insufficient<{strategy.hurst_min_data_points}={insufficient_count}, "
+                f"cycle_fail={cycle_fail_count})"
+            )
+            skipped_timeframes.append((tf, reason))
+            logger.warning(f"Skipping timeframe {tf}: {reason}")
             continue
 
         # 2. Build the 2D Matrices
@@ -185,11 +202,23 @@ async def run_bulk_backtest(
             output_dir.mkdir(parents=True, exist_ok=True)
             csv_path = output_dir / f"trades_PORTFOLIO_{tf}.csv"
             export_trade_log_csv(res["portfolio"], str(csv_path), symbol="PORTFOLIO")
+        else:
+            reason = "backtest engine returned no result"
+            skipped_timeframes.append((tf, reason))
+            logger.warning(f"Skipping timeframe {tf}: {reason}")
 
     conn.close()
 
     elapsed = time.monotonic() - start_time
-    print(f"\n\nBulk run complete in {elapsed:.1f}s. Processed {len(tfs)} timeframes.")
+    print(
+        f"\n\nBulk run complete in {elapsed:.1f}s. "
+        f"Configured={len(tfs)}, completed={len(results)}, skipped={len(skipped_timeframes)}."
+    )
+
+    if skipped_timeframes:
+        print("\nSkipped timeframes:")
+        for tf, reason in skipped_timeframes:
+            print(f"  - {tf}: {reason}")
 
     if not results:
         logger.warning("No results generated. Check if data exists.")
@@ -204,7 +233,7 @@ async def run_bulk_backtest(
     # Console Leaderboard
     print("\n=== LEADERBOARD (Top 10) ===")
     print(df[[
-        "symbol", "timeframe", "sharpe_ratio", "total_return", "max_drawdown", "best_hurst_threshold"
+        "symbol", "timeframe", "sharpe_ratio", "total_return", "max_drawdown", "total_trades", "win_rate", "best_hurst_threshold"
     ]].head(10).to_string(index=False))
 
     # Save to CSV

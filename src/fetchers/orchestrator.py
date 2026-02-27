@@ -11,12 +11,15 @@ from dataclasses import dataclass, field
 from loguru import logger
 
 from src.config import AssetConfig, TimeframeConfig
-from src.data_loader import DBConnection, get_latest_timestamp, upsert_ohlcv
+from src.data_loader import DBConnection, get_latest_timestamp, get_ohlcv_row_count, upsert_ohlcv
 from src.fetchers.crypto_fetcher import fetch_crypto_ohlcv
 from src.fetchers.stock_fetcher import fetch_stock_ohlcv
 
 # Max concurrent fetch tasks to avoid overwhelming APIs
 MAX_CONCURRENT_TASKS = 10
+
+# If history exists but is too sparse, force full backfill instead of incremental fetch.
+MIN_BOOTSTRAP_ROWS = 256
 
 
 @dataclass
@@ -109,7 +112,13 @@ async def fetch_all_assets(
     # Build stock fetch tasks
     for symbol in assets.stock_symbols:
         for tf in timeframes.default_timeframes:
+            row_count = get_ohlcv_row_count(conn, symbol, tf)
             latest_ts = get_latest_timestamp(conn, symbol, tf)
+            if 0 < row_count < MIN_BOOTSTRAP_ROWS:
+                logger.info(
+                    f"{symbol}/{tf} has sparse history ({row_count} rows), forcing full backfill"
+                )
+                latest_ts = None
             yf_interval = timeframes.yfinance_mapping.get(tf, tf)
             tasks.append(_fetch_stock_task(symbol, tf, yf_interval, conn, result, semaphore, latest_ts))
             result.total += 1
@@ -117,7 +126,13 @@ async def fetch_all_assets(
     # Build crypto fetch tasks
     for symbol in assets.crypto_symbols:
         for tf in timeframes.default_timeframes:
+            row_count = get_ohlcv_row_count(conn, symbol, tf)
             latest_ts = get_latest_timestamp(conn, symbol, tf)
+            if 0 < row_count < MIN_BOOTSTRAP_ROWS:
+                logger.info(
+                    f"{symbol}/{tf} has sparse history ({row_count} rows), forcing full backfill"
+                )
+                latest_ts = None
             ccxt_interval = timeframes.ccxt_mapping.get(tf, tf)
             tasks.append(_fetch_crypto_task(symbol, tf, ccxt_interval, assets.crypto_exchange, conn, result, semaphore, latest_ts))
             result.total += 1

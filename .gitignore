@@ -73,6 +73,7 @@ logs/
 # DuckDB
 data/*.duckdb
 data/*.duckdb.wal
+data/backtest/
 
 # uv
 uv.lock

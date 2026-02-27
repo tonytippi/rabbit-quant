@@ -14,9 +14,9 @@ lowpass_cutoff = 0.1
 [filters]
 macro_filter_type = "both" # "hurst", "chop", or "both"
 # HTF (Daily) must be < 45.0 to prove the macro trend is active
-htf_threshold = 50.0 
+htf_threshold = 48
 # LTF must be > 61.8 to prove local volatility has contracted (consolidation) before the cycle triggers
-ltf_threshold = 55
+ltf_threshold = 52
 veto_threshold = 3.0 # Volatility z-score veto
 
 [backtest]
