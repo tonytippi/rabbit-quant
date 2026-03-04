@@ -129,6 +129,13 @@ class StrategyConfig:
         self.max_portfolio_exposure: float = risk.get("max_portfolio_exposure", 0.06)
         self.max_concurrent_trades: int = risk.get("max_concurrent_trades", 3)
 
+        # Bot B settings
+        bot_b = data.get("bot_b", {})
+        self.bot_b_hurst_max: float = bot_b.get("hurst_max", 0.45)
+        self.bot_b_chop_min: float = bot_b.get("chop_min", 61.8)
+        self.bot_b_take_profit_atr: float = bot_b.get("take_profit_atr", 2.0)
+        self.bot_b_stop_loss_atr: float = bot_b.get("stop_loss_atr", 1.0)
+
 
 class PaperConfig:
     """Paper trading parameters loaded from config/strategy.toml."""

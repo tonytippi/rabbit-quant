@@ -95,7 +95,7 @@ async def run_bulk_backtest(
             df_time["timestamp"] = pd.to_datetime(df_time["timestamp"])
             df_time.set_index("timestamp", inplace=True)
 
-            rolling_hurst = calculate_rolling_hurst(df_time, window=100).shift(1).ffill()
+            rolling_hurst = calculate_rolling_hurst(df_time, window=256).shift(1).ffill()
 
             close_dict[sym] = df_time["close_price"]
             high_dict[sym] = df_time["high_price"]
@@ -154,11 +154,22 @@ async def run_bulk_backtest(
         matrix_vol_z = pd.DataFrame(vol_z_dict).reindex(matrix_close.index).ffill().fillna(0.0)
         matrix_htf_dir = pd.DataFrame(htf_dir_dict).reindex(matrix_close.index).ffill().fillna(0.0)
 
-        # Volatility-Adjusted Momentum Ranking
-        lookback = 24
-        momentum = matrix_close.diff(lookback)
-        volatility_adjusted_momentum = momentum / matrix_atr
-        matrix_rank = volatility_adjusted_momentum.fillna(0).replace([np.inf, -np.inf], 0)
+        # Strategy Routing: 0=Bot A (1D), 1=Bot B (LTFs)
+        strategy_type = 1 if tf in ["4h", "1h", "15m"] else 0
+        logger.info(f"Using Strategy Bot {'B (Mean Reversion)' if strategy_type == 1 else 'A (Trend)'}")
+
+        # Ranking Metric
+        if strategy_type == 0:
+            # Volatility-Adjusted Momentum Ranking (Bot A)
+            lookback = 24
+            momentum = matrix_close.diff(lookback)
+            volatility_adjusted_momentum = momentum / matrix_atr
+            matrix_rank = volatility_adjusted_momentum.fillna(0).replace([np.inf, -np.inf], 0)
+        else:
+            # Rubber Band Effect (Bot B) - Distance from 20-SMA
+            # We want to quantify the overextension to find extreme mean-reversion setups
+            sma20 = matrix_close.rolling(window=20).mean()
+            matrix_rank = ((matrix_close - sma20) / sma20).fillna(0).replace([np.inf, -np.inf], 0)
 
         matrix_hurst_df = pd.DataFrame(hurst_dict).reindex(matrix_close.index).ffill().fillna(strategy.hurst_threshold)
         matrix_hurst = matrix_hurst_df.values
@@ -188,7 +199,12 @@ async def run_bulk_backtest(
             risk_per_trade=strategy.risk_per_trade,
             initial_capital=strategy.backtest_initial_capital,
             commission=strategy.backtest_commission,
-            freq=freq_str
+            freq=freq_str,
+            strategy_type=strategy_type,
+            bot_b_hurst_max=strategy.bot_b_hurst_max,
+            bot_b_chop_min=strategy.bot_b_chop_min,
+            bot_b_take_profit_atr=strategy.bot_b_take_profit_atr,
+            bot_b_stop_loss_atr=strategy.bot_b_stop_loss_atr
         )
 
         if res:

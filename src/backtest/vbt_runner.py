@@ -40,6 +40,11 @@ def simulate_portfolio_nb(
     phase_short_center: float,
     phase_tolerance: float,
     max_concurrent_trades: int,
+    strategy_type: int,  # 0 for Bot A (Trend), 1 for Bot B (Mean Reversion)
+    bot_b_hurst_max: float,
+    bot_b_chop_min: float,
+    bot_b_take_profit_atr: float,
+    bot_b_stop_loss_atr: float,
 ) -> tuple:
     """Numba-compiled Time-First loop for Portfolio Execution and Signal Ranking."""
     n_time, n_assets = close.shape
@@ -55,6 +60,7 @@ def simulate_portfolio_nb(
     highest_price = np.zeros(n_assets, dtype=np.float64)
     lowest_price = np.zeros(n_assets, dtype=np.float64)
     stop_loss = np.zeros(n_assets, dtype=np.float64)
+    take_profit = np.zeros(n_assets, dtype=np.float64)
     is_breakeven = np.zeros(n_assets, dtype=np.bool_)
 
     open_trades_count = 0
@@ -63,55 +69,65 @@ def simulate_portfolio_nb(
         # 1. Process EXITS first to free up concurrency budget
         for a in range(n_assets):
             if in_position_long[a]:
-                if high[i, a] > highest_price[a]:
-                    highest_price[a] = high[i, a]
+                if strategy_type == 0:  # Bot A: Trend Following (Dynamic)
+                    if high[i, a] > highest_price[a]:
+                        highest_price[a] = high[i, a]
 
-                # Dynamic ATR Trailing (Truly dynamic - uses current ATR)
-                current_trailing = highest_price[a] - (atr[i, a] * trailing_multiplier)
-                if current_trailing > stop_loss[a]:
-                    stop_loss[a] = current_trailing
+                    # Dynamic ATR Trailing
+                    current_trailing = highest_price[a] - (atr[i, a] * trailing_multiplier)
+                    if current_trailing > stop_loss[a]:
+                        stop_loss[a] = current_trailing
 
-                # Breakeven Ratchet
-                if not is_breakeven[a]:
-                    if high[i, a] >= entry_price[a] + (atr[i, a] * breakeven_threshold):
-                        # Move stop to entry + 0.2% fee coverage
-                        be_level = entry_price[a] * 1.002
-                        if be_level > stop_loss[a]:
-                            stop_loss[a] = be_level
-                            is_breakeven[a] = True
+                    # Breakeven Ratchet
+                    if not is_breakeven[a]:
+                        if high[i, a] >= entry_price[a] + (atr[i, a] * breakeven_threshold):
+                            be_level = entry_price[a] * 1.002
+                            if be_level > stop_loss[a]:
+                                stop_loss[a] = be_level
+                                is_breakeven[a] = True
 
-                # Check Exit
-                if close[i, a] <= stop_loss[a]:
-                    long_exits[i, a] = True
-                    in_position_long[a] = False
-                    open_trades_count -= 1
+                    # Check Exit
+                    if close[i, a] <= stop_loss[a]:
+                        long_exits[i, a] = True
+                        in_position_long[a] = False
+                        open_trades_count -= 1
+                else:  # Bot B: Mean Reversion (Static)
+                    if high[i, a] >= take_profit[a] or close[i, a] <= stop_loss[a]:
+                        long_exits[i, a] = True
+                        in_position_long[a] = False
+                        open_trades_count -= 1
 
             elif in_position_short[a]:
-                if low[i, a] < lowest_price[a]:
-                    lowest_price[a] = low[i, a]
+                if strategy_type == 0:  # Bot A: Trend Following (Dynamic)
+                    if low[i, a] < lowest_price[a]:
+                        lowest_price[a] = low[i, a]
 
-                # Dynamic ATR Trailing
-                current_trailing = lowest_price[a] + (atr[i, a] * trailing_multiplier)
-                if current_trailing < stop_loss[a]:
-                    stop_loss[a] = current_trailing
+                    # Dynamic ATR Trailing
+                    current_trailing = lowest_price[a] + (atr[i, a] * trailing_multiplier)
+                    if current_trailing < stop_loss[a]:
+                        stop_loss[a] = current_trailing
 
-                # Breakeven Ratchet
-                if not is_breakeven[a]:
-                    if low[i, a] <= entry_price[a] - (atr[i, a] * breakeven_threshold):
-                        be_level = entry_price[a] * 0.998
-                        if be_level < stop_loss[a]:
-                            stop_loss[a] = be_level
-                            is_breakeven[a] = True
+                    # Breakeven Ratchet
+                    if not is_breakeven[a]:
+                        if low[i, a] <= entry_price[a] - (atr[i, a] * breakeven_threshold):
+                            be_level = entry_price[a] * 0.998
+                            if be_level < stop_loss[a]:
+                                stop_loss[a] = be_level
+                                is_breakeven[a] = True
 
-                # Check Exit
-                if close[i, a] >= stop_loss[a]:
-                    short_exits[i, a] = True
-                    in_position_short[a] = False
-                    open_trades_count -= 1
+                    # Check Exit
+                    if close[i, a] >= stop_loss[a]:
+                        short_exits[i, a] = True
+                        in_position_short[a] = False
+                        open_trades_count -= 1
+                else:  # Bot B: Mean Reversion (Static)
+                    if low[i, a] <= take_profit[a] or close[i, a] >= stop_loss[a]:
+                        short_exits[i, a] = True
+                        in_position_short[a] = False
+                        open_trades_count -= 1
 
         # 2. Process ENTRIES
         if open_trades_count < max_concurrent_trades:
-            # Rank candidates by Volatility-Adjusted Momentum
             scores = np.full(n_assets, -1e10, dtype=np.float64)
             dirs = np.zeros(n_assets, dtype=np.int8) # 1=Long, -1=Short
             for a in range(n_assets):
@@ -123,34 +139,42 @@ def simulate_portfolio_nb(
                 if volatility_zscore[i, a] >= veto_threshold:
                     continue
 
-                # Evaluate macro filters based on macro_filter_type
-                # 0 = chop, 1 = hurst, 2 = both
+                # Regime Filtering
                 valid = False
-                chop_valid = (htf_metric[i, a] < htf_threshold) and (ltf_metric[i, a] > ltf_threshold)
-                hurst_valid = (hurst_value[i, a] > hurst_threshold)
-
-                if macro_filter_type == 0:
-                    valid = chop_valid
-                elif macro_filter_type == 1:
-                    valid = hurst_valid
-                else: # 2 = both
-                    valid = chop_valid and hurst_valid
+                if strategy_type == 0:  # Bot A: Trend (Macro Expansion)
+                    chop_valid = (htf_metric[i, a] < htf_threshold) and (ltf_metric[i, a] > ltf_threshold)
+                    hurst_valid = (hurst_value[i, a] > hurst_threshold)
+                    if macro_filter_type == 0:
+                        valid = chop_valid
+                    elif macro_filter_type == 1:
+                        valid = hurst_valid
+                    else: # 2 = both
+                        valid = chop_valid and hurst_valid
+                else:  # Bot B: Mean Reversion (Macro Compression)
+                    valid = (hurst_value[i, a] < bot_b_hurst_max) and (ltf_metric[i, a] > bot_b_chop_min)
 
                 if not valid:
                     continue
 
                 prev_phase = phase_array[i-1, a] % (2.0 * np.pi)
 
-                if htf_direction[i, a] >= 0:
+                # Signal Selection + Ranking
+                if htf_direction[i, a] >= 0: # Long
                     if abs(phase - phase_long_center) < phase_tolerance and not (abs(prev_phase - phase_long_center) < phase_tolerance):
-                        scores[a] = rank_metric[i, a]
                         dirs[a] = 1
-                elif htf_direction[i, a] <= 0:
+                        if strategy_type == 0:
+                            scores[a] = rank_metric[i, a] # High momentum
+                        else:
+                            scores[a] = -rank_metric[i, a] # Extreme negative deviation
+                elif htf_direction[i, a] <= 0: # Short
                     if abs(phase - phase_short_center) < phase_tolerance and not (abs(prev_phase - phase_short_center) < phase_tolerance):
-                        scores[a] = -rank_metric[i, a]
                         dirs[a] = -1
+                        if strategy_type == 0:
+                            scores[a] = -rank_metric[i, a] # High negative momentum
+                        else:
+                            scores[a] = rank_metric[i, a] # Extreme positive deviation
 
-            # Sort by Momentum Score descending
+            # Sort by Score descending
             sorted_indices = np.argsort(scores)[::-1]
 
             for a in sorted_indices:
@@ -165,13 +189,23 @@ def simulate_portfolio_nb(
                 if dirs[a] == 1:
                     long_entries[i, a] = True
                     in_position_long[a] = True
-                    stop_loss[a] = entry_price[a] - (atr[i, a] * trailing_multiplier)
+                    if strategy_type == 0:
+                        stop_loss[a] = entry_price[a] - (atr[i, a] * trailing_multiplier)
+                    else:
+                        stop_loss[a] = entry_price[a] - (atr[i, a] * bot_b_stop_loss_atr)
+                        take_profit[a] = entry_price[a] + (atr[i, a] * bot_b_take_profit_atr)
                 else:
                     short_entries[i, a] = True
                     in_position_short[a] = True
-                    stop_loss[a] = entry_price[a] + (atr[i, a] * trailing_multiplier)
+                    if strategy_type == 0:
+                        stop_loss[a] = entry_price[a] + (atr[i, a] * trailing_multiplier)
+                    else:
+                        stop_loss[a] = entry_price[a] + (atr[i, a] * bot_b_stop_loss_atr)
+                        take_profit[a] = entry_price[a] - (atr[i, a] * bot_b_take_profit_atr)
 
                 open_trades_count += 1
+
+    return long_entries, long_exits, short_entries, short_exits
 
     return long_entries, long_exits, short_entries, short_exits
 
@@ -199,6 +233,11 @@ def build_entries_exits(
     phase_long_center: float = 4.712,
     phase_short_center: float = 1.571,
     phase_tolerance: float = 0.785,
+    strategy_type: int = 0,
+    bot_b_hurst_max: float = 0.45,
+    bot_b_chop_min: float = 61.8,
+    bot_b_take_profit_atr: float = 2.0,
+    bot_b_stop_loss_atr: float = 1.0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Build long/short entry and exit boolean arrays from cycle phase + MTF metrics.
     Handles 1D (single asset) and 2D (multi-asset) inputs.
@@ -242,7 +281,10 @@ def build_entries_exits(
         float(htf_threshold), float(ltf_threshold), float(veto_threshold), float(hurst_threshold), int(mf_type),
         float(trailing_multiplier), float(breakeven_threshold),
         float(phase_long_center), float(phase_short_center), float(phase_tolerance),
-        int(max_concurrent_trades)
+        int(max_concurrent_trades),
+        int(strategy_type),
+        float(bot_b_hurst_max), float(bot_b_chop_min),
+        float(bot_b_take_profit_atr), float(bot_b_stop_loss_atr)
     )
 
     if is_1d:
@@ -277,6 +319,11 @@ def run_backtest(
     phase_short_center: float = 1.571,
     phase_tolerance: float = 0.785,
     freq: str | None = None,
+    strategy_type: int = 0,
+    bot_b_hurst_max: float = 0.45,
+    bot_b_chop_min: float = 61.8,
+    bot_b_take_profit_atr: float = 2.0,
+    bot_b_stop_loss_atr: float = 1.0,
 ) -> dict | None:
     """Run a single backtest with given parameters (1D or 2D)."""
     try:
@@ -301,6 +348,11 @@ def run_backtest(
             macro_filter_type=macro_filter_type,
             phase_long_center=phase_long_center, phase_short_center=phase_short_center,
             phase_tolerance=phase_tolerance,
+            strategy_type=strategy_type,
+            bot_b_hurst_max=bot_b_hurst_max,
+            bot_b_chop_min=bot_b_chop_min,
+            bot_b_take_profit_atr=bot_b_take_profit_atr,
+            bot_b_stop_loss_atr=bot_b_stop_loss_atr,
         )
 
         size = np.full(c_val.shape, np.nan)
@@ -313,7 +365,8 @@ def run_backtest(
             min_atr = c_val * 0.002
             safe_atr = np.maximum(a_val, min_atr)
 
-            distance_to_stop = trailing_multiplier * safe_atr
+            stop_mult = trailing_multiplier if strategy_type == 0 else bot_b_stop_loss_atr
+            distance_to_stop = stop_mult * safe_atr
             calculated_fraction = risk_per_trade * (c_val / distance_to_stop)
 
             # Cap maximum leverage per trade to 1.0 (100% of equity)

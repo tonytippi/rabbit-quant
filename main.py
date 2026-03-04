@@ -146,13 +146,23 @@ def cmd_backtest(args: argparse.Namespace) -> None:
         htf_dir_df = pd.DataFrame(htf_directions).fillna(0.0)
         phase_df = pd.DataFrame(phase_arrays).fillna(0.0)
         
-        # Volatility-Adjusted Momentum Ranking (Phase 3.5)
-        # 24-period lookback (e.g. 4 days on a 4H chart)
-        lookback = 24
-        momentum = close_df.diff(lookback)
-        volatility_adjusted_momentum = momentum / atr_df
-        # Clean NaNs and Infs for Numba compatibility
-        rank_metric_df = volatility_adjusted_momentum.fillna(0).replace([np.inf, -np.inf], 0)
+        # Strategy Routing: 0=Bot A (1D), 1=Bot B (LTFs)
+        strategy_type = 1 if timeframe in ["4h", "1h", "15m"] else 0
+        logger.info(f"Using Strategy Bot {'B (Mean Reversion)' if strategy_type == 1 else 'A (Trend)'}")
+
+        # Ranking Metric
+        if strategy_type == 0:
+            # Volatility-Adjusted Momentum Ranking (Phase 3.5)
+            # 24-period lookback (e.g. 4 days on a 4H chart)
+            lookback = 24
+            momentum = close_df.diff(lookback)
+            volatility_adjusted_momentum = momentum / atr_df
+            # Clean NaNs and Infs for Numba compatibility
+            rank_metric_df = volatility_adjusted_momentum.fillna(0).replace([np.inf, -np.inf], 0)
+        else:
+            # Rubber Band Effect (Bot B) - Distance from 20-SMA
+            sma20 = close_df.rolling(window=20).mean()
+            rank_metric_df = ((close_df - sma20) / sma20).fillna(0).replace([np.inf, -np.inf], 0)
         
         avg_hurst = np.mean(list(hurst_values.values()))
 
@@ -173,6 +183,11 @@ def cmd_backtest(args: argparse.Namespace) -> None:
                 initial_capital=_strategy.backtest_initial_capital,
                 commission=_strategy.backtest_commission,
                 freq=vbt_freq,
+                strategy_type=strategy_type,
+                bot_b_hurst_max=_strategy.bot_b_hurst_max,
+                bot_b_chop_min=_strategy.bot_b_chop_min,
+                bot_b_take_profit_atr=_strategy.bot_b_take_profit_atr,
+                bot_b_stop_loss_atr=_strategy.bot_b_stop_loss_atr
             )
 
             # Show top results
@@ -239,6 +254,11 @@ def cmd_backtest(args: argparse.Namespace) -> None:
                 initial_capital=_strategy.backtest_initial_capital,
                 commission=_strategy.backtest_commission,
                 freq=vbt_freq,
+                strategy_type=strategy_type,
+                bot_b_hurst_max=_strategy.bot_b_hurst_max,
+                bot_b_chop_min=_strategy.bot_b_chop_min,
+                bot_b_take_profit_atr=_strategy.bot_b_take_profit_atr,
+                bot_b_stop_loss_atr=_strategy.bot_b_stop_loss_atr
             )
 
             if result is None:

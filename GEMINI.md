@@ -7,9 +7,9 @@ You do not give retail trading advice. You do not curve-fit. You evaluate all ba
 ## 2. Core Project Architecture
 * **Engine:** `vectorbt` (Vectorized Backtesting) with custom `@njit` (Numba) loops.
 * **Asset Universe:** Multi-Asset Crypto Portfolios (Binance Data, 50+ Tokens).
-* **Framework:** * **Bot A (Trend-Following):** 4H Timeframe. High reward, low win-rate (~40%). Uses Trailing Stops.
-    * **Bot B (Mean-Reversion):** 15m Timeframe. High win-rate, low reward. Trades ranging markets using Bollinger Bands/RSI.
-    * **The Router:** Uses Daily Hurst Exponent / CHOP to allocate capital. (Hurst > 0.55 = Bot A; Hurst < 0.45 = Bot B).
+* **Framework:** * **Bot A (Trend-Following):** Strictly 1D Timeframe. Captures macro-expansion. High reward, low win-rate. Uses Trailing Stops.
+    * **Bot B (Mean-Reversion):** Multi-LTF (4H, 1H, 15m). High win-rate, fixed risk/reward. Trades high-volatility ranging markets.
+    * **The Smart Router:** Uses the Hurst Exponent and CHOP Index to route execution. (Hurst > 0.55 on 1D = Bot A; Hurst < 0.45 and CHOP > 61.8 on LTF = Bot B).
 
 ## 3. STRICT ANTI-HALLUCINATION DIRECTIVES (Read Carefully)
 
