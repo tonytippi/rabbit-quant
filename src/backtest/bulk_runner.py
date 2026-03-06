@@ -55,7 +55,7 @@ async def run_bulk_backtest(
         conn.close()
 
     symbols = assets.crypto_symbols if asset_type == "crypto" else assets.stock_symbols
-    tfs = timeframes.default_timeframes
+    tfs = list(set(strategy.bot_a_timeframes + strategy.bot_b_timeframes))
 
     logger.info(f"Starting bulk backtest for {len(symbols)} symbols x {len(tfs)} timeframes...")
     start_time = time.monotonic()
@@ -155,8 +155,21 @@ async def run_bulk_backtest(
         matrix_htf_dir = pd.DataFrame(htf_dir_dict).reindex(matrix_close.index).ffill().fillna(0.0)
 
         # Strategy Routing: 0=Bot A (1D), 1=Bot B (LTFs)
-        strategy_type = 1 if tf in ["4h", "1h", "15m"] else 0
+        strategy_type = 1 if tf in strategy.bot_b_timeframes else 0
         logger.info(f"Using Strategy Bot {'B (Mean Reversion)' if strategy_type == 1 else 'A (Trend)'}")
+
+        if strategy_type == 0:
+            active_max_concurrent = strategy.bot_a_max_concurrent_trades
+            active_risk = strategy.bot_a_risk_per_trade
+            active_hurst_threshold = strategy.bot_a_hurst_min
+            active_htf_threshold = strategy.bot_a_chop_htf_max
+            active_ltf_threshold = strategy.bot_a_ltf_chop_min
+        else:
+            active_max_concurrent = strategy.bot_b_max_concurrent_trades
+            active_risk = strategy.bot_b_risk_per_trade
+            active_hurst_threshold = strategy.bot_b_hurst_max
+            active_htf_threshold = 45.0  # Unused practically by bot B
+            active_ltf_threshold = strategy.bot_b_chop_min
 
         # Ranking Metric
         if strategy_type == 0:
@@ -189,14 +202,14 @@ async def run_bulk_backtest(
             htf_direction=matrix_htf_dir.values,
             rank_metric=matrix_rank.values,
             macro_filter_type=strategy.macro_filter_type,
-            htf_threshold=strategy.htf_threshold,
-            ltf_threshold=strategy.ltf_threshold,
+            htf_threshold=active_htf_threshold,
+            ltf_threshold=active_ltf_threshold,
             veto_threshold=strategy.veto_threshold,
-            hurst_threshold=strategy.hurst_threshold,
+            hurst_threshold=active_hurst_threshold,
             trailing_multiplier=strategy.trailing_atr_multiplier,
             breakeven_threshold=strategy.breakeven_atr_threshold,
-            max_concurrent_trades=strategy.max_concurrent_trades,
-            risk_per_trade=strategy.risk_per_trade,
+            max_concurrent_trades=active_max_concurrent,
+            risk_per_trade=active_risk,
             initial_capital=strategy.backtest_initial_capital,
             commission=strategy.backtest_commission,
             freq=freq_str,
@@ -204,7 +217,8 @@ async def run_bulk_backtest(
             bot_b_hurst_max=strategy.bot_b_hurst_max,
             bot_b_chop_min=strategy.bot_b_chop_min,
             bot_b_take_profit_atr=strategy.bot_b_take_profit_atr,
-            bot_b_stop_loss_atr=strategy.bot_b_stop_loss_atr
+            bot_b_stop_loss_atr=strategy.bot_b_stop_loss_atr,
+            bot_b_max_holding_bars=strategy.bot_b_max_holding_bars
         )
 
         if res:

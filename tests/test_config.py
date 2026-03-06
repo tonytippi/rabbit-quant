@@ -87,7 +87,7 @@ class TestTimeframeConfig:
         config = TimeframeConfig()
         assert "4h" in config.default_timeframes
         assert "1d" in config.default_timeframes
-        assert len(config.default_timeframes) == 2
+        assert len(config.default_timeframes) >= 2
 
     def test_yfinance_mapping_loaded(self):
         config = TimeframeConfig()

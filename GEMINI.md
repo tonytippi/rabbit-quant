@@ -7,9 +7,9 @@ You do not give retail trading advice. You do not curve-fit. You evaluate all ba
 ## 2. Core Project Architecture
 * **Engine:** `vectorbt` (Vectorized Backtesting) with custom `@njit` (Numba) loops.
 * **Asset Universe:** Multi-Asset Crypto Portfolios (Binance Data, 50+ Tokens).
-* **Framework:** * **Bot A (Trend-Following):** Strictly 1D Timeframe. Captures macro-expansion. High reward, low win-rate. Uses Trailing Stops.
-    * **Bot B (Mean-Reversion):** Multi-LTF (4H, 1H, 15m). High win-rate, fixed risk/reward. Trades high-volatility ranging markets.
-    * **The Smart Router:** Uses the Hurst Exponent and CHOP Index to route execution. (Hurst > 0.55 on 1D = Bot A; Hurst < 0.45 and CHOP > 61.8 on LTF = Bot B).
+* **Framework:** * **Bot A (Trend-Following):** Configurable Timeframe (Default: 1D). Captures macro-expansion. High reward, low win-rate (~40%). Uses Trailing Stops and Breakeven Ratchets.
+    * **Bot B (Mean-Reversion):** Configurable Timeframe (Default: 4H). High win-rate (> 60%), fixed risk/reward, and Time-Based Exits. Trades high-volatility ranging markets.
+    * **The Config-Driven Smart Router:** Uses the Hurst Exponent and CHOP Index to route execution. The router dynamically reads allowed `timeframes`, `hurst_thresholds`, and `chop_thresholds` directly from the deeply isolated `[bot_a]` and `[bot_b]` blocks in `strategy.toml`.
 
 ## 3. STRICT ANTI-HALLUCINATION DIRECTIVES (Read Carefully)
 
@@ -20,10 +20,13 @@ When analyzing backtests or generating code, you MUST adhere to the following qu
 * **Rule:** True geometric compounding must be simulated in the backtest using `size_type="percent"`. 
 * **Rule:** A high Sharpe Ratio is meaningless if the Total Return fails to beat the Risk-Free Rate or a basic Buy-and-Hold benchmark. Do not praise a Sharpe of 3.0 if the CAGR is 5%.
 
-### B. The Risk Limit & "Portfolio Heat" Fallacy
+### B. The Risk Limit, "Portfolio Heat", & Asymmetric Sizing
 * **NEVER** suggest increasing `risk_per_trade` beyond 1% to 2% to artificially inflate returns.
 * **NEVER** suggest "Shotgunning" 10-15 correlated crypto assets simultaneously.
-* **Rule:** Crypto L1s (BTC, ETH, SOL) are **highly correlated** (High Covariance), not uncorrelated. True portfolio diversification requires strict Portfolio Exposure Caps (e.g., Max 2 concurrent trades = 4% total account heat).
+* **Rule:** Crypto L1s (BTC, ETH, SOL) are **highly correlated** (High Covariance), not uncorrelated. True portfolio diversification requires strict Asymmetric Portfolio Exposure Caps:
+    * Bot A (Trend): Max 2 concurrent trades @ 2% risk per trade (4% Heat).
+    * Bot B (Mean Reversion): Max 4 concurrent trades @ 1% risk per trade (4% Heat).
+    * Total System Heat must never exceed 8%.
 
 ### C. The "Alphabetical Capital Drain" (Matrix Constraint)
 * **NEVER** allow a 2D multi-asset Numba loop to execute "Asset-First" (Iterating through all of column A, then column B). This breaks portfolio-level awareness.
@@ -38,6 +41,10 @@ When analyzing backtests or generating code, you MUST adhere to the following qu
 ### E. The "Breakeven Ratchet" Collision (Exit Constraint)
 * **NEVER** set a Breakeven Ratchet multiplier equal to or smaller than the Trailing Stop multiplier. (e.g., Ratchet = 1x ATR, Trail = 1x ATR).
 * **Rule:** Moving the Stop Loss to Breakeven too early chokes the trade during normal market pullbacks. Allow wide trailing stops (2.5x to 3.5x ATR) enough breathing room to ride the macro trend.
+
+### F. The "Capital Velocity" Mandate (Time Stops)
+* **NEVER** allow a Mean Reversion strategy (Bot B) to hold a position indefinitely in a ranging market if it fails to hit its static Take Profit or Stop Loss. 
+* **Rule:** Mean reversion relies on immediate mathematical elasticity (the "snap-back"). If the price action stagnates, the setup is dead. You must enforce a strict **Time-Based Exit** (e.g., max 12 bars holding period) to free up concurrency slots, maintain capital velocity, and prevent trade starvation.
 
 ## 4. Mathematical Standards for Code Generation
 

@@ -123,17 +123,28 @@ class StrategyConfig:
 
         # Risk settings
         risk = data.get("risk", {})
-        self.risk_per_trade: float = risk.get("risk_per_trade", 0.02)
         self.trailing_atr_multiplier: float = risk.get("trailing_atr_multiplier", 3.0)
         self.breakeven_atr_threshold: float = risk.get("breakeven_atr_threshold", 2.0)
-        self.max_portfolio_exposure: float = risk.get("max_portfolio_exposure", 0.06)
-        self.max_concurrent_trades: int = risk.get("max_concurrent_trades", 3)
+        self.max_portfolio_exposure: float = risk.get("max_portfolio_exposure", 0.04)
+
+        # Bot A settings
+        bot_a = data.get("bot_a", {})
+        self.bot_a_timeframes: list[str] = bot_a.get("timeframes", ["1d"])
+        self.bot_a_max_concurrent_trades: int = bot_a.get("max_concurrent_trades", 2)
+        self.bot_a_risk_per_trade: float = bot_a.get("risk_per_trade", 0.02)
+        self.bot_a_hurst_min: float = bot_a.get("hurst_min", 0.55)
+        self.bot_a_chop_htf_max: float = bot_a.get("chop_htf_max", 45.0)
+        self.bot_a_ltf_chop_min: float = bot_a.get("ltf_chop_min", 61.8)
 
         # Bot B settings
         bot_b = data.get("bot_b", {})
-        self.bot_b_hurst_max: float = bot_b.get("hurst_max", 0.45)
-        self.bot_b_chop_min: float = bot_b.get("chop_min", 61.8)
-        self.bot_b_take_profit_atr: float = bot_b.get("take_profit_atr", 2.0)
+        self.bot_b_timeframes: list[str] = bot_b.get("timeframes", ["4h"])
+        self.bot_b_max_concurrent_trades: int = bot_b.get("max_concurrent_trades", 4)
+        self.bot_b_risk_per_trade: float = bot_b.get("risk_per_trade", 0.01)
+        self.bot_b_max_holding_bars: int = bot_b.get("max_holding_bars", 12)
+        self.bot_b_hurst_max: float = bot_b.get("hurst_max", 0.55)
+        self.bot_b_chop_min: float = bot_b.get("chop_min", 58.0)
+        self.bot_b_take_profit_atr: float = bot_b.get("take_profit_atr", 1.5)
         self.bot_b_stop_loss_atr: float = bot_b.get("stop_loss_atr", 1.0)
 
 

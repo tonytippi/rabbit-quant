@@ -45,6 +45,7 @@ def simulate_portfolio_nb(
     bot_b_chop_min: float,
     bot_b_take_profit_atr: float,
     bot_b_stop_loss_atr: float,
+    bot_b_max_holding_bars: int,
 ) -> tuple:
     """Numba-compiled Time-First loop for Portfolio Execution and Signal Ranking."""
     n_time, n_assets = close.shape
@@ -62,6 +63,7 @@ def simulate_portfolio_nb(
     stop_loss = np.zeros(n_assets, dtype=np.float64)
     take_profit = np.zeros(n_assets, dtype=np.float64)
     is_breakeven = np.zeros(n_assets, dtype=np.bool_)
+    bars_in_trade = np.zeros(n_assets, dtype=np.int32)
 
     open_trades_count = 0
 
@@ -69,6 +71,7 @@ def simulate_portfolio_nb(
         # 1. Process EXITS first to free up concurrency budget
         for a in range(n_assets):
             if in_position_long[a]:
+                bars_in_trade[a] += 1
                 if strategy_type == 0:  # Bot A: Trend Following (Dynamic)
                     if high[i, a] > highest_price[a]:
                         highest_price[a] = high[i, a]
@@ -92,12 +95,13 @@ def simulate_portfolio_nb(
                         in_position_long[a] = False
                         open_trades_count -= 1
                 else:  # Bot B: Mean Reversion (Static)
-                    if high[i, a] >= take_profit[a] or close[i, a] <= stop_loss[a]:
+                    if high[i, a] >= take_profit[a] or close[i, a] <= stop_loss[a] or bars_in_trade[a] >= bot_b_max_holding_bars:
                         long_exits[i, a] = True
                         in_position_long[a] = False
                         open_trades_count -= 1
 
             elif in_position_short[a]:
+                bars_in_trade[a] += 1
                 if strategy_type == 0:  # Bot A: Trend Following (Dynamic)
                     if low[i, a] < lowest_price[a]:
                         lowest_price[a] = low[i, a]
@@ -121,7 +125,7 @@ def simulate_portfolio_nb(
                         in_position_short[a] = False
                         open_trades_count -= 1
                 else:  # Bot B: Mean Reversion (Static)
-                    if low[i, a] <= take_profit[a] or close[i, a] >= stop_loss[a]:
+                    if low[i, a] <= take_profit[a] or close[i, a] >= stop_loss[a] or bars_in_trade[a] >= bot_b_max_holding_bars:
                         short_exits[i, a] = True
                         in_position_short[a] = False
                         open_trades_count -= 1
@@ -185,6 +189,7 @@ def simulate_portfolio_nb(
                 highest_price[a] = high[i, a]
                 lowest_price[a] = low[i, a]
                 is_breakeven[a] = False
+                bars_in_trade[a] = 0
 
                 if dirs[a] == 1:
                     long_entries[i, a] = True
@@ -238,6 +243,7 @@ def build_entries_exits(
     bot_b_chop_min: float = 61.8,
     bot_b_take_profit_atr: float = 2.0,
     bot_b_stop_loss_atr: float = 1.0,
+    bot_b_max_holding_bars: int = 12,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Build long/short entry and exit boolean arrays from cycle phase + MTF metrics.
     Handles 1D (single asset) and 2D (multi-asset) inputs.
@@ -284,7 +290,8 @@ def build_entries_exits(
         int(max_concurrent_trades),
         int(strategy_type),
         float(bot_b_hurst_max), float(bot_b_chop_min),
-        float(bot_b_take_profit_atr), float(bot_b_stop_loss_atr)
+        float(bot_b_take_profit_atr), float(bot_b_stop_loss_atr),
+        int(bot_b_max_holding_bars)
     )
 
     if is_1d:
@@ -324,6 +331,7 @@ def run_backtest(
     bot_b_chop_min: float = 61.8,
     bot_b_take_profit_atr: float = 2.0,
     bot_b_stop_loss_atr: float = 1.0,
+    bot_b_max_holding_bars: int = 12,
 ) -> dict | None:
     """Run a single backtest with given parameters (1D or 2D)."""
     try:
@@ -353,6 +361,7 @@ def run_backtest(
             bot_b_chop_min=bot_b_chop_min,
             bot_b_take_profit_atr=bot_b_take_profit_atr,
             bot_b_stop_loss_atr=bot_b_stop_loss_atr,
+            bot_b_max_holding_bars=bot_b_max_holding_bars,
         )
 
         size = np.full(c_val.shape, np.nan)
