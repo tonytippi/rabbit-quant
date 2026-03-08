@@ -36,7 +36,7 @@ breakeven_atr_threshold = 2.0
 max_portfolio_exposure = 0.04 # Adjusted max exposure (2 concurrent trades * 2%)
 
 [bot_a]
-timeframes = ["1d"]
+timeframes = []
 max_concurrent_trades = 2
 risk_per_trade = 0.02
 hurst_min = 0.55
@@ -44,14 +44,42 @@ chop_htf_max = 45.0
 ltf_chop_min = 61.8
 
 [bot_b]
-timeframes = ["15m", "1h", "4h"]
+timeframes = []
 max_concurrent_trades = 4
 risk_per_trade = 0.01
-max_holding_bars = 8
+max_holding_bars = 12
 hurst_max = 0.55
 chop_min = 58.0
-take_profit_atr = 2.0
+take_profit_atr = 1.2
+stop_loss_atr = 3.0
+rsi_period = 14
+rsi_oversold = 35
+rsi_overbought = 65
+
+[bot_c]
+timeframes = ["15m", "1h"]
+max_concurrent_trades = 4
+risk_per_trade = 0.01
+max_holding_bars = 12
+take_profit_atr = 1.5
 stop_loss_atr = 1.0
+bb_window = 20
+bb_std = 2.0
+kc_window = 20
+kc_multiplier = 1.5
+rsi_period = 14
+rsi_oversold = 30.0
+
+[bot_d]
+timeframes = ["15m", "1h"]
+max_concurrent_trades = 4
+risk_per_trade = 0.01
+max_holding_bars = 12
+take_profit_atr = 1.5
+stop_loss_atr = 1.0
+atr_ma_window = 50
+rsi_period = 14
+rsi_oversold = 20.0
 
 [paper]
 initial_balance = 1000.0

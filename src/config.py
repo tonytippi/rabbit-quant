@@ -146,6 +146,36 @@ class StrategyConfig:
         self.bot_b_chop_min: float = bot_b.get("chop_min", 58.0)
         self.bot_b_take_profit_atr: float = bot_b.get("take_profit_atr", 1.5)
         self.bot_b_stop_loss_atr: float = bot_b.get("stop_loss_atr", 1.0)
+        self.bot_b_rsi_period: int = bot_b.get("rsi_period", 14)
+        self.bot_b_rsi_oversold: float = bot_b.get("rsi_oversold", 30.0)
+        self.bot_b_rsi_overbought: float = bot_b.get("rsi_overbought", 70.0)
+
+        # Bot C settings
+        bot_c = data.get("bot_c", {})
+        self.bot_c_timeframes: list[str] = bot_c.get("timeframes", [])
+        self.bot_c_max_concurrent_trades: int = bot_c.get("max_concurrent_trades", 4)
+        self.bot_c_risk_per_trade: float = bot_c.get("risk_per_trade", 0.01)
+        self.bot_c_max_holding_bars: int = bot_c.get("max_holding_bars", 12)
+        self.bot_c_take_profit_atr: float = bot_c.get("take_profit_atr", 1.5)
+        self.bot_c_stop_loss_atr: float = bot_c.get("stop_loss_atr", 1.0)
+        self.bot_c_bb_window: int = bot_c.get("bb_window", 20)
+        self.bot_c_bb_std: float = bot_c.get("bb_std", 2.0)
+        self.bot_c_kc_window: int = bot_c.get("kc_window", 20)
+        self.bot_c_kc_multiplier: float = bot_c.get("kc_multiplier", 1.5)
+        self.bot_c_rsi_period: int = bot_c.get("rsi_period", 14)
+        self.bot_c_rsi_oversold: float = bot_c.get("rsi_oversold", 30.0)
+
+        # Bot D settings
+        bot_d = data.get("bot_d", {})
+        self.bot_d_timeframes: list[str] = bot_d.get("timeframes", [])
+        self.bot_d_max_concurrent_trades: int = bot_d.get("max_concurrent_trades", 4)
+        self.bot_d_risk_per_trade: float = bot_d.get("risk_per_trade", 0.01)
+        self.bot_d_max_holding_bars: int = bot_d.get("max_holding_bars", 12)
+        self.bot_d_take_profit_atr: float = bot_d.get("take_profit_atr", 1.5)
+        self.bot_d_stop_loss_atr: float = bot_d.get("stop_loss_atr", 1.0)
+        self.bot_d_atr_ma_window: int = bot_d.get("atr_ma_window", 50)
+        self.bot_d_rsi_period: int = bot_d.get("rsi_period", 14)
+        self.bot_d_rsi_oversold: float = bot_d.get("rsi_oversold", 30.0)
 
 
 class PaperConfig:

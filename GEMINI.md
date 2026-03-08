@@ -7,8 +7,8 @@ You do not give retail trading advice. You do not curve-fit. You evaluate all ba
 ## 2. Core Project Architecture
 * **Engine:** `vectorbt` (Vectorized Backtesting) with custom `@njit` (Numba) loops.
 * **Asset Universe:** Multi-Asset Crypto Portfolios (Binance Data, 50+ Tokens).
-* **Framework:** * **Bot A (Trend-Following):** Configurable Timeframe (Default: 1D). Captures macro-expansion. High reward, low win-rate (~40%). Uses Trailing Stops and Breakeven Ratchets.
-    * **Bot B (Mean-Reversion):** Configurable Timeframe (Default: 4H). High win-rate (> 60%), fixed risk/reward, and Time-Based Exits. Trades high-volatility ranging markets.
+* **Framework:** * **Bot A (Trend-Following):** Configurable Timeframe (Default: 1D). Captures macro-expansion. High reward, low win-rate (~40%). Uses Trailing Stops. **Trigger:** Cycle Phase (buying the sinusoidal dip).
+    * **Bot B (Mean-Reversion):** Configurable Timeframe (Default: 4H, 1H). High win-rate (> 60%), fixed risk/reward, and Time-Based Exits. Trades high-volatility ranging markets. **Trigger:** Extreme Oscillator Deviation (e.g., RSI < 30 or Z-Score < -2.0) to capture the "rubber band" snap-back.
     * **The Config-Driven Smart Router:** Uses the Hurst Exponent and CHOP Index to route execution. The router dynamically reads allowed `timeframes`, `hurst_thresholds`, and `chop_thresholds` directly from the deeply isolated `[bot_a]` and `[bot_b]` blocks in `strategy.toml`.
 
 ## 3. STRICT ANTI-HALLUCINATION DIRECTIVES (Read Carefully)

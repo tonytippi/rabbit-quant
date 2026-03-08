@@ -28,6 +28,11 @@ def simulate_portfolio_nb(
     volatility_zscore: np.ndarray,
     htf_direction: np.ndarray,
     rank_metric: np.ndarray,
+    bb_upper: np.ndarray,
+    bb_lower: np.ndarray,
+    kc_upper: np.ndarray,
+    kc_lower: np.ndarray,
+    atr_ma: np.ndarray,
     hurst_value: np.ndarray,
     htf_threshold: float,
     ltf_threshold: float,
@@ -40,12 +45,22 @@ def simulate_portfolio_nb(
     phase_short_center: float,
     phase_tolerance: float,
     max_concurrent_trades: int,
-    strategy_type: int,  # 0 for Bot A (Trend), 1 for Bot B (Mean Reversion)
+    strategy_type: int,  # 0 for Bot A, 1 for Bot B, 2 for Bot C, 3 for Bot D
     bot_b_hurst_max: float,
     bot_b_chop_min: float,
     bot_b_take_profit_atr: float,
     bot_b_stop_loss_atr: float,
     bot_b_max_holding_bars: int,
+    bot_b_rsi_oversold: float,
+    bot_b_rsi_overbought: float,
+    bot_c_take_profit_atr: float,
+    bot_c_stop_loss_atr: float,
+    bot_c_max_holding_bars: int,
+    bot_c_rsi_oversold: float,
+    bot_d_take_profit_atr: float,
+    bot_d_stop_loss_atr: float,
+    bot_d_max_holding_bars: int,
+    bot_d_rsi_oversold: float,
 ) -> tuple:
     """Numba-compiled Time-First loop for Portfolio Execution and Signal Ranking."""
     n_time, n_assets = close.shape
@@ -94,8 +109,9 @@ def simulate_portfolio_nb(
                         long_exits[i, a] = True
                         in_position_long[a] = False
                         open_trades_count -= 1
-                else:  # Bot B: Mean Reversion (Static)
-                    if high[i, a] >= take_profit[a] or close[i, a] <= stop_loss[a] or bars_in_trade[a] >= bot_b_max_holding_bars:
+                else:  # Bot B, C, D: Mean Reversion (Static)
+                    max_holding = bot_b_max_holding_bars if strategy_type == 1 else bot_c_max_holding_bars if strategy_type == 2 else bot_d_max_holding_bars
+                    if high[i, a] >= take_profit[a] or close[i, a] <= stop_loss[a] or bars_in_trade[a] >= max_holding:
                         long_exits[i, a] = True
                         in_position_long[a] = False
                         open_trades_count -= 1
@@ -124,8 +140,9 @@ def simulate_portfolio_nb(
                         short_exits[i, a] = True
                         in_position_short[a] = False
                         open_trades_count -= 1
-                else:  # Bot B: Mean Reversion (Static)
-                    if low[i, a] <= take_profit[a] or close[i, a] >= stop_loss[a] or bars_in_trade[a] >= bot_b_max_holding_bars:
+                else:  # Bot B, C, D: Mean Reversion (Static)
+                    max_holding = bot_b_max_holding_bars if strategy_type == 1 else bot_c_max_holding_bars if strategy_type == 2 else bot_d_max_holding_bars
+                    if low[i, a] <= take_profit[a] or close[i, a] >= stop_loss[a] or bars_in_trade[a] >= max_holding:
                         short_exits[i, a] = True
                         in_position_short[a] = False
                         open_trades_count -= 1
@@ -154,8 +171,12 @@ def simulate_portfolio_nb(
                         valid = hurst_valid
                     else: # 2 = both
                         valid = chop_valid and hurst_valid
-                else:  # Bot B: Mean Reversion (Macro Compression)
+                elif strategy_type == 1:  # Bot B: Mean Reversion (Macro Compression)
                     valid = (hurst_value[i, a] < bot_b_hurst_max) and (ltf_metric[i, a] > bot_b_chop_min)
+                elif strategy_type == 2:  # Bot C: Bollinger/Keltner Squeeze
+                    valid = True # logic will be directly in signal selection
+                elif strategy_type == 3:  # Bot D: ATR-Filtered RSI
+                    valid = True
 
                 if not valid:
                     continue
@@ -163,20 +184,38 @@ def simulate_portfolio_nb(
                 prev_phase = phase_array[i-1, a] % (2.0 * np.pi)
 
                 # Signal Selection + Ranking
-                if htf_direction[i, a] >= 0: # Long
-                    if abs(phase - phase_long_center) < phase_tolerance and not (abs(prev_phase - phase_long_center) < phase_tolerance):
-                        dirs[a] = 1
-                        if strategy_type == 0:
+                if strategy_type == 0:
+                    if htf_direction[i, a] >= 0: # Long
+                        if abs(phase - phase_long_center) < phase_tolerance and not (abs(prev_phase - phase_long_center) < phase_tolerance):
+                            dirs[a] = 1
                             scores[a] = rank_metric[i, a] # High momentum
-                        else:
-                            scores[a] = -rank_metric[i, a] # Extreme negative deviation
-                elif htf_direction[i, a] <= 0: # Short
-                    if abs(phase - phase_short_center) < phase_tolerance and not (abs(prev_phase - phase_short_center) < phase_tolerance):
-                        dirs[a] = -1
-                        if strategy_type == 0:
+                    elif htf_direction[i, a] <= 0: # Short
+                        if abs(phase - phase_short_center) < phase_tolerance and not (abs(prev_phase - phase_short_center) < phase_tolerance):
+                            dirs[a] = -1
                             scores[a] = -rank_metric[i, a] # High negative momentum
-                        else:
-                            scores[a] = rank_metric[i, a] # Extreme positive deviation
+                elif strategy_type == 1:
+                    # Bot B uses RSI (passed as rank_metric) for both entry trigger and ranking
+                    rsi = rank_metric[i, a]
+                    if rsi < bot_b_rsi_oversold:
+                        dirs[a] = 1
+                        scores[a] = -rsi # Lowest RSI = highest priority
+                    elif rsi > bot_b_rsi_overbought:
+                        dirs[a] = -1
+                        scores[a] = rsi # Highest RSI = highest priority
+                elif strategy_type == 2:
+                    # Bot C: Squeeze Model
+                    is_squeeze = (bb_upper[i, a] < kc_upper[i, a]) and (bb_lower[i, a] > kc_lower[i, a])
+                    rsi = rank_metric[i, a]
+                    if is_squeeze and (low[i, a] < bb_lower[i, a]) and (rsi < bot_c_rsi_oversold):
+                        dirs[a] = 1
+                        scores[a] = -rsi
+                elif strategy_type == 3:
+                    # Bot D: Pure ATR-RSI Model
+                    is_low_vol = atr[i, a] < atr_ma[i, a]
+                    rsi = rank_metric[i, a]
+                    if is_low_vol and (rsi < bot_d_rsi_oversold):
+                        dirs[a] = 1
+                        scores[a] = -rsi
 
             # Sort by Score descending
             sorted_indices = np.argsort(scores)[::-1]
@@ -196,17 +235,29 @@ def simulate_portfolio_nb(
                     in_position_long[a] = True
                     if strategy_type == 0:
                         stop_loss[a] = entry_price[a] - (atr[i, a] * trailing_multiplier)
-                    else:
+                    elif strategy_type == 1:
                         stop_loss[a] = entry_price[a] - (atr[i, a] * bot_b_stop_loss_atr)
                         take_profit[a] = entry_price[a] + (atr[i, a] * bot_b_take_profit_atr)
+                    elif strategy_type == 2:
+                        stop_loss[a] = entry_price[a] - (atr[i, a] * bot_c_stop_loss_atr)
+                        take_profit[a] = entry_price[a] + (atr[i, a] * bot_c_take_profit_atr)
+                    elif strategy_type == 3:
+                        stop_loss[a] = entry_price[a] - (atr[i, a] * bot_d_stop_loss_atr)
+                        take_profit[a] = entry_price[a] + (atr[i, a] * bot_d_take_profit_atr)
                 else:
                     short_entries[i, a] = True
                     in_position_short[a] = True
                     if strategy_type == 0:
                         stop_loss[a] = entry_price[a] + (atr[i, a] * trailing_multiplier)
-                    else:
+                    elif strategy_type == 1:
                         stop_loss[a] = entry_price[a] + (atr[i, a] * bot_b_stop_loss_atr)
                         take_profit[a] = entry_price[a] - (atr[i, a] * bot_b_take_profit_atr)
+                    elif strategy_type == 2:
+                        stop_loss[a] = entry_price[a] + (atr[i, a] * bot_c_stop_loss_atr)
+                        take_profit[a] = entry_price[a] - (atr[i, a] * bot_c_take_profit_atr)
+                    elif strategy_type == 3:
+                        stop_loss[a] = entry_price[a] + (atr[i, a] * bot_d_stop_loss_atr)
+                        take_profit[a] = entry_price[a] - (atr[i, a] * bot_d_take_profit_atr)
 
                 open_trades_count += 1
 
@@ -226,6 +277,11 @@ def build_entries_exits(
     volatility_zscore: np.ndarray | None = None,
     htf_direction: np.ndarray | None = None,
     rank_metric: np.ndarray | None = None,
+    bb_upper: np.ndarray | None = None,
+    bb_lower: np.ndarray | None = None,
+    kc_upper: np.ndarray | None = None,
+    kc_lower: np.ndarray | None = None,
+    atr_ma: np.ndarray | None = None,
     htf_threshold: float = 45,
     ltf_threshold: float = 61.8,
     veto_threshold: float = 3.0,
@@ -244,6 +300,16 @@ def build_entries_exits(
     bot_b_take_profit_atr: float = 2.0,
     bot_b_stop_loss_atr: float = 1.0,
     bot_b_max_holding_bars: int = 12,
+    bot_b_rsi_oversold: float = 30.0,
+    bot_b_rsi_overbought: float = 70.0,
+    bot_c_take_profit_atr: float = 1.5,
+    bot_c_stop_loss_atr: float = 1.0,
+    bot_c_max_holding_bars: int = 12,
+    bot_c_rsi_oversold: float = 30.0,
+    bot_d_take_profit_atr: float = 1.5,
+    bot_d_stop_loss_atr: float = 1.0,
+    bot_d_max_holding_bars: int = 12,
+    bot_d_rsi_oversold: float = 30.0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Build long/short entry and exit boolean arrays from cycle phase + MTF metrics.
     Handles 1D (single asset) and 2D (multi-asset) inputs.
@@ -273,6 +339,12 @@ def build_entries_exits(
     vz_2d = to_2d(volatility_zscore).astype(np.float64) if volatility_zscore is not None else np.zeros_like(c_2d)
     hd_2d = to_2d(htf_direction).astype(np.float64) if htf_direction is not None else np.ones_like(c_2d)
     rm_2d = to_2d(rank_metric).astype(np.float64) if rank_metric is not None else np.zeros_like(c_2d)
+    
+    bbu_2d = to_2d(bb_upper).astype(np.float64) if bb_upper is not None else np.zeros_like(c_2d)
+    bbl_2d = to_2d(bb_lower).astype(np.float64) if bb_lower is not None else np.zeros_like(c_2d)
+    kcu_2d = to_2d(kc_upper).astype(np.float64) if kc_upper is not None else np.zeros_like(c_2d)
+    kcl_2d = to_2d(kc_lower).astype(np.float64) if kc_lower is not None else np.zeros_like(c_2d)
+    ama_2d = to_2d(atr_ma).astype(np.float64) if atr_ma is not None else np.zeros_like(c_2d)
 
     if isinstance(hurst_value, (float, int)):
         hv_2d = np.full_like(c_2d, float(hurst_value))
@@ -283,7 +355,9 @@ def build_entries_exits(
     mf_type = filter_type_map.get(macro_filter_type, 2)
 
     long_entries, long_exits, short_entries, short_exits = simulate_portfolio_nb(
-        c_2d, h_2d, l_2d, a_2d, p_2d, ltf_m, htf_m, vz_2d, hd_2d, rm_2d, hv_2d,
+        c_2d, h_2d, l_2d, a_2d, p_2d, ltf_m, htf_m, vz_2d, hd_2d, rm_2d,
+        bbu_2d, bbl_2d, kcu_2d, kcl_2d, ama_2d,
+        hv_2d,
         float(htf_threshold), float(ltf_threshold), float(veto_threshold), float(hurst_threshold), int(mf_type),
         float(trailing_multiplier), float(breakeven_threshold),
         float(phase_long_center), float(phase_short_center), float(phase_tolerance),
@@ -291,7 +365,9 @@ def build_entries_exits(
         int(strategy_type),
         float(bot_b_hurst_max), float(bot_b_chop_min),
         float(bot_b_take_profit_atr), float(bot_b_stop_loss_atr),
-        int(bot_b_max_holding_bars)
+        int(bot_b_max_holding_bars), float(bot_b_rsi_oversold), float(bot_b_rsi_overbought),
+        float(bot_c_take_profit_atr), float(bot_c_stop_loss_atr), int(bot_c_max_holding_bars), float(bot_c_rsi_oversold),
+        float(bot_d_take_profit_atr), float(bot_d_stop_loss_atr), int(bot_d_max_holding_bars), float(bot_d_rsi_oversold)
     )
 
     if is_1d:
@@ -311,6 +387,11 @@ def run_backtest(
     volatility_zscore: np.ndarray | None = None,
     htf_direction: np.ndarray | None = None,
     rank_metric: np.ndarray | None = None,
+    bb_upper: np.ndarray | None = None,
+    bb_lower: np.ndarray | None = None,
+    kc_upper: np.ndarray | None = None,
+    kc_lower: np.ndarray | None = None,
+    atr_ma: np.ndarray | None = None,
     htf_threshold: float = 45,
     ltf_threshold: float = 61.8,
     veto_threshold: float = 3.0,
@@ -332,6 +413,16 @@ def run_backtest(
     bot_b_take_profit_atr: float = 2.0,
     bot_b_stop_loss_atr: float = 1.0,
     bot_b_max_holding_bars: int = 12,
+    bot_b_rsi_oversold: float = 30.0,
+    bot_b_rsi_overbought: float = 70.0,
+    bot_c_take_profit_atr: float = 1.5,
+    bot_c_stop_loss_atr: float = 1.0,
+    bot_c_max_holding_bars: int = 12,
+    bot_c_rsi_oversold: float = 30.0,
+    bot_d_take_profit_atr: float = 1.5,
+    bot_d_stop_loss_atr: float = 1.0,
+    bot_d_max_holding_bars: int = 12,
+    bot_d_rsi_oversold: float = 30.0,
 ) -> dict | None:
     """Run a single backtest with given parameters (1D or 2D)."""
     try:
@@ -339,6 +430,12 @@ def run_backtest(
         h_val = high.values if hasattr(high, "values") else (np.asarray(high) if high is not None else None)
         l_val = low.values if hasattr(low, "values") else (np.asarray(low) if low is not None else None)
         a_val = atr.values if hasattr(atr, "values") else (np.asarray(atr) if atr is not None else None)
+
+        bbu_val = bb_upper.values if hasattr(bb_upper, "values") else (np.asarray(bb_upper) if bb_upper is not None else None)
+        bbl_val = bb_lower.values if hasattr(bb_lower, "values") else (np.asarray(bb_lower) if bb_lower is not None else None)
+        kcu_val = kc_upper.values if hasattr(kc_upper, "values") else (np.asarray(kc_upper) if kc_upper is not None else None)
+        kcl_val = kc_lower.values if hasattr(kc_lower, "values") else (np.asarray(kc_lower) if kc_lower is not None else None)
+        ama_val = atr_ma.values if hasattr(atr_ma, "values") else (np.asarray(atr_ma) if atr_ma is not None else None)
 
         long_entries, long_exits, short_entries, short_exits = build_entries_exits(
             c_val,
@@ -348,6 +445,7 @@ def run_backtest(
             phase_array=phase_array,
             ltf_metric=ltf_metric, htf_metric=htf_metric, volatility_zscore=volatility_zscore,
             htf_direction=htf_direction, rank_metric=rank_metric,
+            bb_upper=bbu_val, bb_lower=bbl_val, kc_upper=kcu_val, kc_lower=kcl_val, atr_ma=ama_val,
             htf_threshold=htf_threshold, ltf_threshold=ltf_threshold, veto_threshold=veto_threshold,
             trailing_multiplier=trailing_multiplier,
             breakeven_threshold=breakeven_threshold,
@@ -362,6 +460,16 @@ def run_backtest(
             bot_b_take_profit_atr=bot_b_take_profit_atr,
             bot_b_stop_loss_atr=bot_b_stop_loss_atr,
             bot_b_max_holding_bars=bot_b_max_holding_bars,
+            bot_b_rsi_oversold=bot_b_rsi_oversold,
+            bot_b_rsi_overbought=bot_b_rsi_overbought,
+            bot_c_take_profit_atr=bot_c_take_profit_atr,
+            bot_c_stop_loss_atr=bot_c_stop_loss_atr,
+            bot_c_max_holding_bars=bot_c_max_holding_bars,
+            bot_c_rsi_oversold=bot_c_rsi_oversold,
+            bot_d_take_profit_atr=bot_d_take_profit_atr,
+            bot_d_stop_loss_atr=bot_d_stop_loss_atr,
+            bot_d_max_holding_bars=bot_d_max_holding_bars,
+            bot_d_rsi_oversold=bot_d_rsi_oversold,
         )
 
         size = np.full(c_val.shape, np.nan)
@@ -374,7 +482,11 @@ def run_backtest(
             min_atr = c_val * 0.002
             safe_atr = np.maximum(a_val, min_atr)
 
-            stop_mult = trailing_multiplier if strategy_type == 0 else bot_b_stop_loss_atr
+            stop_mult = trailing_multiplier if strategy_type == 0 else (
+                bot_b_stop_loss_atr if strategy_type == 1 else (
+                    bot_c_stop_loss_atr if strategy_type == 2 else bot_d_stop_loss_atr
+                )
+            )
             distance_to_stop = stop_mult * safe_atr
             calculated_fraction = risk_per_trade * (c_val / distance_to_stop)
 
@@ -430,6 +542,11 @@ def run_parameter_sweep(
     volatility_zscore: np.ndarray | None = None,
     htf_direction: np.ndarray | None = None,
     rank_metric: np.ndarray | None = None,
+    bb_upper: np.ndarray | None = None,
+    bb_lower: np.ndarray | None = None,
+    kc_upper: np.ndarray | None = None,
+    kc_lower: np.ndarray | None = None,
+    atr_ma: np.ndarray | None = None,
     hurst_range: list[float] | None = None,
     phase_long_range: list[float] | None = None,
     phase_short_range: list[float] | None = None,
@@ -441,6 +558,22 @@ def run_parameter_sweep(
     initial_capital: float = 100_000.0,
     commission: float = 0.001,
     freq: str | None = None,
+    strategy_type: int = 0,
+    bot_b_hurst_max: float = 0.45,
+    bot_b_chop_min: float = 61.8,
+    bot_b_take_profit_atr: float = 2.0,
+    bot_b_stop_loss_atr: float = 1.0,
+    bot_b_max_holding_bars: int = 12,
+    bot_b_rsi_oversold: float = 30.0,
+    bot_b_rsi_overbought: float = 70.0,
+    bot_c_take_profit_atr: float = 1.5,
+    bot_c_stop_loss_atr: float = 1.0,
+    bot_c_max_holding_bars: int = 12,
+    bot_c_rsi_oversold: float = 30.0,
+    bot_d_take_profit_atr: float = 1.5,
+    bot_d_stop_loss_atr: float = 1.0,
+    bot_d_max_holding_bars: int = 12,
+    bot_d_rsi_oversold: float = 30.0,
 ) -> pd.DataFrame:
     """Sweep strategy parameters across a multi-dimensional grid."""
     if hurst_range is None:
@@ -469,6 +602,7 @@ def run_parameter_sweep(
                             close, high=high, low=low, atr=atr, phase_array=phase_array, hurst_value=hurst_value,
                             ltf_metric=ltf_metric, htf_metric=htf_metric, volatility_zscore=volatility_zscore,
                             htf_direction=htf_direction, rank_metric=rank_metric,
+                            bb_upper=bb_upper, bb_lower=bb_lower, kc_upper=kc_upper, kc_lower=kc_lower, atr_ma=atr_ma,
                             hurst_threshold=ht,
                             ltf_threshold=ltf_chop_threshold,
                             htf_threshold=45, # change from 38.2 to catch the trend beginning earlier
@@ -482,6 +616,22 @@ def run_parameter_sweep(
                             phase_long_center=pl,
                             phase_short_center=ps,
                             freq=freq,
+                            strategy_type=strategy_type,
+                            bot_b_hurst_max=bot_b_hurst_max,
+                            bot_b_chop_min=bot_b_chop_min,
+                            bot_b_take_profit_atr=bot_b_take_profit_atr,
+                            bot_b_stop_loss_atr=bot_b_stop_loss_atr,
+                            bot_b_max_holding_bars=bot_b_max_holding_bars,
+                            bot_b_rsi_oversold=bot_b_rsi_oversold,
+                            bot_b_rsi_overbought=bot_b_rsi_overbought,
+                            bot_c_take_profit_atr=bot_c_take_profit_atr,
+                            bot_c_stop_loss_atr=bot_c_stop_loss_atr,
+                            bot_c_max_holding_bars=bot_c_max_holding_bars,
+                            bot_c_rsi_oversold=bot_c_rsi_oversold,
+                            bot_d_take_profit_atr=bot_d_take_profit_atr,
+                            bot_d_stop_loss_atr=bot_d_stop_loss_atr,
+                            bot_d_max_holding_bars=bot_d_max_holding_bars,
+                            bot_d_rsi_oversold=bot_d_rsi_oversold,
                         )
 
                         row = {

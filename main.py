@@ -58,6 +58,8 @@ def cmd_backtest(args: argparse.Namespace) -> None:
     from src.signals.filters import calculate_atr_zscore_series
     import pandas as pd
 
+    from src.backtest.bulk_runner import _calculate_bb_kc_series
+
     logger.info("Starting backtest...")
     conn = get_connection(_settings)
 
@@ -66,17 +68,9 @@ def cmd_backtest(args: argparse.Namespace) -> None:
         timeframe = args.timeframe
         vbt_freq = timeframe.replace("m", "min")
 
-        # Dictionaries to hold series for each symbol
-        closes = {}
-        highs = {}
-        lows = {}
-        atrs = {}
-        ltf_metrics = {}
-        htf_metrics = {}
-        volatility_zscores = {}
-        htf_directions = {}
-        phase_arrays = {}
-        hurst_values = {} # We'll just take the mean for legacy or drop it
+        closes, highs, lows, atrs, ltf_metrics, htf_metrics = {}, {}, {}, {}, {}, {}
+        volatility_zscores, htf_directions, phase_arrays, hurst_values = {}, {}, {}, {}
+        bb_uppers, bb_lowers, kc_uppers, kc_lowers, atr_mas = {}, {}, {}, {}, {}
 
         for sym in symbols:
             df = query_ohlcv(conn, sym, timeframe)
@@ -87,43 +81,35 @@ def cmd_backtest(args: argparse.Namespace) -> None:
             df_time = df.copy()
             df_time["timestamp"] = pd.to_datetime(df_time["timestamp"])
             df_time.set_index("timestamp", inplace=True)
-            
-            # Basic Price
+
             closes[sym] = df_time["close_price"]
             highs[sym] = df_time["high_price"]
             lows[sym] = df_time["low_price"]
-            
-            # ATR
+
             tr1 = highs[sym] - lows[sym]
             tr2 = (highs[sym] - closes[sym].shift(1)).abs()
             tr3 = (lows[sym] - closes[sym].shift(1)).abs()
             tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
             atrs[sym] = tr.rolling(window=14).mean().fillna(0.0)
-            
-            # LTF Metrics
+
             ltf_metrics[sym] = calculate_chop(df_time)
             volatility_zscores[sym] = calculate_atr_zscore_series(df_time)
-            
-            # HTF Metrics
+
             daily_df = df_time.resample("1D").agg({
-                "open_price": "first",
-                "high_price": "max",
-                "low_price": "min",
-                "close_price": "last",
-                "volume": "sum"
+                "open_price": "first", "high_price": "max", "low_price": "min",
+                "close_price": "last", "volume": "sum"
             }).dropna()
-            
+
             daily_chop = calculate_chop(daily_df)
             safe_daily_chop = daily_chop.shift(1)
-            
+
             daily_sma = daily_df["close_price"].rolling(window=50).mean()
             daily_direction = np.where(daily_df["close_price"] > daily_sma, 1, -1)
             safe_daily_dir = pd.Series(daily_direction, index=daily_df.index).shift(1)
-            
+
             htf_metrics[sym] = safe_daily_chop.reindex(df_time.index).ffill().fillna(50.0)
             htf_directions[sym] = safe_daily_dir.reindex(df_time.index).ffill().fillna(0)
 
-            # Cycle
             cycle_result = detect_dominant_cycle_filtered(df, cutoff=_strategy.cycle_lowpass_cutoff)
             if cycle_result is None:
                 logger.warning(f"No cycle found for {sym}")
@@ -131,14 +117,20 @@ def cmd_backtest(args: argparse.Namespace) -> None:
             phase_arrays[sym] = pd.Series(cycle_result["phase_array"], index=df_time.index)
             hurst_values[sym] = calculate_hurst(df)
 
+            bbu, bbl, kcu, kcl = _calculate_bb_kc_series(df_time, _strategy.bot_c_bb_window, _strategy.bot_c_bb_std, _strategy.bot_c_kc_window, _strategy.bot_c_kc_multiplier)
+            bb_uppers[sym] = bbu
+            bb_lowers[sym] = bbl
+            kc_uppers[sym] = kcu
+            kc_lowers[sym] = kcl
+            atr_mas[sym] = atrs[sym].rolling(window=_strategy.bot_d_atr_ma_window).mean().bfill()
         if not closes:
             print("No valid data available for any provided symbols.")
             return
 
         # Combine into 2D DataFrames
-        close_df = pd.DataFrame(closes).ffill().fillna(method='bfill')
-        high_df = pd.DataFrame(highs).ffill().fillna(method='bfill')
-        low_df = pd.DataFrame(lows).ffill().fillna(method='bfill')
+        close_df = pd.DataFrame(closes).ffill().bfill()
+        high_df = pd.DataFrame(highs).ffill().bfill()
+        low_df = pd.DataFrame(lows).ffill().bfill()
         atr_df = pd.DataFrame(atrs).fillna(0.0)
         ltf_metric_df = pd.DataFrame(ltf_metrics).fillna(100.0)
         htf_metric_df = pd.DataFrame(htf_metrics).fillna(50.0)
@@ -146,9 +138,32 @@ def cmd_backtest(args: argparse.Namespace) -> None:
         htf_dir_df = pd.DataFrame(htf_directions).fillna(0.0)
         phase_df = pd.DataFrame(phase_arrays).fillna(0.0)
         
+        bb_upper_df = pd.DataFrame(bb_uppers).ffill().fillna(0.0)
+        bb_lower_df = pd.DataFrame(bb_lowers).ffill().fillna(0.0)
+        kc_upper_df = pd.DataFrame(kc_uppers).ffill().fillna(0.0)
+        kc_lower_df = pd.DataFrame(kc_lowers).ffill().fillna(0.0)
+        atr_ma_df = pd.DataFrame(atr_mas).ffill().fillna(0.0)
+        
         # Strategy Routing: 0=Bot A (1D), 1=Bot B (LTFs)
-        strategy_type = 1 if timeframe in ["4h", "1h", "15m"] else 0
-        logger.info(f"Using Strategy Bot {'B (Mean Reversion)' if strategy_type == 1 else 'A (Trend)'}")
+        strategy_type = 2 if timeframe in _strategy.bot_c_timeframes else (
+            3 if timeframe in _strategy.bot_d_timeframes else (
+                1 if timeframe in _strategy.bot_b_timeframes else 0
+            )
+        )
+        logger.info(f"Using Strategy Bot {strategy_type}")
+
+        if strategy_type == 0:
+            active_max_concurrent = _strategy.bot_a_max_concurrent_trades
+            active_risk = _strategy.bot_a_risk_per_trade
+        elif strategy_type == 1:
+            active_max_concurrent = _strategy.bot_b_max_concurrent_trades
+            active_risk = _strategy.bot_b_risk_per_trade
+        elif strategy_type == 2:
+            active_max_concurrent = _strategy.bot_c_max_concurrent_trades
+            active_risk = _strategy.bot_c_risk_per_trade
+        elif strategy_type == 3:
+            active_max_concurrent = _strategy.bot_d_max_concurrent_trades
+            active_risk = _strategy.bot_d_risk_per_trade
 
         # Ranking Metric
         if strategy_type == 0:
@@ -160,9 +175,15 @@ def cmd_backtest(args: argparse.Namespace) -> None:
             # Clean NaNs and Infs for Numba compatibility
             rank_metric_df = volatility_adjusted_momentum.fillna(0).replace([np.inf, -np.inf], 0)
         else:
-            # Rubber Band Effect (Bot B) - Distance from 20-SMA
-            sma20 = close_df.rolling(window=20).mean()
-            rank_metric_df = ((close_df - sma20) / sma20).fillna(0).replace([np.inf, -np.inf], 0)
+            # Extreme Oscillator Deviation (Bot B) - Use RSI
+            delta = close_df.diff()
+            gain = delta.clip(lower=0)
+            loss = -delta.clip(upper=0)
+            avg_gain = gain.ewm(com=_strategy.bot_b_rsi_period - 1, adjust=False).mean()
+            avg_loss = loss.ewm(com=_strategy.bot_b_rsi_period - 1, adjust=False).mean()
+            rs = avg_gain / avg_loss
+            rsi = 100 - (100 / (1 + rs))
+            rank_metric_df = rsi.bfill().fillna(50.0)
         
         avg_hurst = np.mean(list(hurst_values.values()))
 
@@ -178,8 +199,8 @@ def cmd_backtest(args: argparse.Namespace) -> None:
                 trailing_multiplier_range=_strategy.backtest_trailing_atr_multiplier_range,
                 macro_filter_type_range=["hurst", "chop", "both"],
                 breakeven_threshold=_strategy.breakeven_atr_threshold,
-                max_concurrent_trades=_strategy.max_concurrent_trades,
-                risk_per_trade=_strategy.risk_per_trade,
+                max_concurrent_trades=active_max_concurrent,
+                risk_per_trade=active_risk,
                 initial_capital=_strategy.backtest_initial_capital,
                 commission=_strategy.backtest_commission,
                 freq=vbt_freq,
@@ -187,7 +208,17 @@ def cmd_backtest(args: argparse.Namespace) -> None:
                 bot_b_hurst_max=_strategy.bot_b_hurst_max,
                 bot_b_chop_min=_strategy.bot_b_chop_min,
                 bot_b_take_profit_atr=_strategy.bot_b_take_profit_atr,
-                bot_b_stop_loss_atr=_strategy.bot_b_stop_loss_atr
+                bot_b_stop_loss_atr=_strategy.bot_b_stop_loss_atr,
+                bot_b_rsi_oversold=_strategy.bot_b_rsi_oversold,
+                bot_b_rsi_overbought=_strategy.bot_b_rsi_overbought,
+                bot_c_take_profit_atr=_strategy.bot_c_take_profit_atr,
+                bot_c_stop_loss_atr=_strategy.bot_c_stop_loss_atr,
+                bot_c_max_holding_bars=_strategy.bot_c_max_holding_bars,
+                bot_c_rsi_oversold=_strategy.bot_c_rsi_oversold,
+                bot_d_take_profit_atr=_strategy.bot_d_take_profit_atr,
+                bot_d_stop_loss_atr=_strategy.bot_d_stop_loss_atr,
+                bot_d_max_holding_bars=_strategy.bot_d_max_holding_bars,
+                bot_d_rsi_oversold=_strategy.bot_d_rsi_oversold
             )
 
             # Show top results
@@ -249,8 +280,8 @@ def cmd_backtest(args: argparse.Namespace) -> None:
                 hurst_threshold=_strategy.hurst_threshold,
                 trailing_multiplier=_strategy.trailing_atr_multiplier,
                 breakeven_threshold=_strategy.breakeven_atr_threshold,
-                max_concurrent_trades=_strategy.max_concurrent_trades,
-                risk_per_trade=_strategy.risk_per_trade,
+                max_concurrent_trades=active_max_concurrent,
+                risk_per_trade=active_risk,
                 initial_capital=_strategy.backtest_initial_capital,
                 commission=_strategy.backtest_commission,
                 freq=vbt_freq,
@@ -258,7 +289,17 @@ def cmd_backtest(args: argparse.Namespace) -> None:
                 bot_b_hurst_max=_strategy.bot_b_hurst_max,
                 bot_b_chop_min=_strategy.bot_b_chop_min,
                 bot_b_take_profit_atr=_strategy.bot_b_take_profit_atr,
-                bot_b_stop_loss_atr=_strategy.bot_b_stop_loss_atr
+                bot_b_stop_loss_atr=_strategy.bot_b_stop_loss_atr,
+                bot_b_rsi_oversold=_strategy.bot_b_rsi_oversold,
+                bot_b_rsi_overbought=_strategy.bot_b_rsi_overbought,
+                bot_c_take_profit_atr=_strategy.bot_c_take_profit_atr,
+                bot_c_stop_loss_atr=_strategy.bot_c_stop_loss_atr,
+                bot_c_max_holding_bars=_strategy.bot_c_max_holding_bars,
+                bot_c_rsi_oversold=_strategy.bot_c_rsi_oversold,
+                bot_d_take_profit_atr=_strategy.bot_d_take_profit_atr,
+                bot_d_stop_loss_atr=_strategy.bot_d_stop_loss_atr,
+                bot_d_max_holding_bars=_strategy.bot_d_max_holding_bars,
+                bot_d_rsi_oversold=_strategy.bot_d_rsi_oversold
             )
 
             if result is None:

@@ -36,6 +36,42 @@ def _calculate_atr_series(df: pd.DataFrame, period: int = 14) -> pd.Series:
     return atr.bfill()
 
 
+def _calculate_rsi_series(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    """Calculate Relative Strength Index (RSI)."""
+    close = df["close_price"]
+    delta = close.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+
+    avg_gain = gain.ewm(com=period - 1, adjust=False).mean()
+    avg_loss = loss.ewm(com=period - 1, adjust=False).mean()
+
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.bfill().fillna(50.0)
+
+
+def _calculate_bb_kc_series(df: pd.DataFrame, bb_window: int = 20, bb_std: float = 2.0, kc_window: int = 20, kc_mult: float = 1.5):
+    """Calculate Bollinger Bands and Keltner Channels."""
+    close = df["close_price"]
+    high = df["high_price"]
+    low = df["low_price"]
+    
+    # Bollinger Bands
+    sma = close.rolling(window=bb_window).mean()
+    std = close.rolling(window=bb_window).std()
+    bb_upper = sma + (std * bb_std)
+    bb_lower = sma - (std * bb_std)
+    
+    # Keltner Channels
+    ema = close.ewm(span=kc_window, adjust=False).mean()
+    atr = _calculate_atr_series(df, period=kc_window)
+    kc_upper = ema + (atr * kc_mult)
+    kc_lower = ema - (atr * kc_mult)
+    
+    return bb_upper.bfill(), bb_lower.bfill(), kc_upper.bfill(), kc_lower.bfill()
+
+
 async def run_bulk_backtest(
     settings: AppSettings,
     assets: AssetConfig,
@@ -55,7 +91,12 @@ async def run_bulk_backtest(
         conn.close()
 
     symbols = assets.crypto_symbols if asset_type == "crypto" else assets.stock_symbols
-    tfs = list(set(strategy.bot_a_timeframes + strategy.bot_b_timeframes))
+    tfs = list(set(
+        strategy.bot_a_timeframes +
+        strategy.bot_b_timeframes +
+        strategy.bot_c_timeframes +
+        strategy.bot_d_timeframes
+    ))
 
     logger.info(f"Starting bulk backtest for {len(symbols)} symbols x {len(tfs)} timeframes...")
     start_time = time.monotonic()
@@ -71,6 +112,8 @@ async def run_bulk_backtest(
         close_dict, high_dict, low_dict = {}, {}, {}
         atr_dict, phase_dict, hurst_dict = {}, {}, {}
         ltf_dict, htf_dict, vol_z_dict, htf_dir_dict = {}, {}, {}, {}
+        rsi_dict, atr_ma_dict = {}, {}
+        bb_upper_dict, bb_lower_dict, kc_upper_dict, kc_lower_dict = {}, {}, {}, {}
 
         missing_count = 0
         insufficient_count = 0
@@ -104,6 +147,17 @@ async def run_bulk_backtest(
             atr_dict[sym] = _calculate_atr_series(df_time, period=14)
             phase_dict[sym] = pd.Series(cycle_result["phase_array"], index=df_time.index)
             hurst_dict[sym] = rolling_hurst
+            rsi_dict[sym] = _calculate_rsi_series(df_time, period=max(strategy.bot_b_rsi_period, strategy.bot_c_rsi_period, strategy.bot_d_rsi_period))
+            
+            # Bot C (Squeeze)
+            bbu, bbl, kcu, kcl = _calculate_bb_kc_series(df_time, strategy.bot_c_bb_window, strategy.bot_c_bb_std, strategy.bot_c_kc_window, strategy.bot_c_kc_multiplier)
+            bb_upper_dict[sym] = bbu
+            bb_lower_dict[sym] = bbl
+            kc_upper_dict[sym] = kcu
+            kc_lower_dict[sym] = kcl
+            
+            # Bot D (ATR MA)
+            atr_ma_dict[sym] = atr_dict[sym].rolling(window=strategy.bot_d_atr_ma_window).mean().bfill()
 
             # LTF metrics
             ltf_dict[sym] = calculate_chop(df_time)
@@ -153,89 +207,126 @@ async def run_bulk_backtest(
         matrix_htf = pd.DataFrame(htf_dict).reindex(matrix_close.index).ffill().fillna(50.0)
         matrix_vol_z = pd.DataFrame(vol_z_dict).reindex(matrix_close.index).ffill().fillna(0.0)
         matrix_htf_dir = pd.DataFrame(htf_dir_dict).reindex(matrix_close.index).ffill().fillna(0.0)
-
-        # Strategy Routing: 0=Bot A (1D), 1=Bot B (LTFs)
-        strategy_type = 1 if tf in strategy.bot_b_timeframes else 0
-        logger.info(f"Using Strategy Bot {'B (Mean Reversion)' if strategy_type == 1 else 'A (Trend)'}")
-
-        if strategy_type == 0:
-            active_max_concurrent = strategy.bot_a_max_concurrent_trades
-            active_risk = strategy.bot_a_risk_per_trade
-            active_hurst_threshold = strategy.bot_a_hurst_min
-            active_htf_threshold = strategy.bot_a_chop_htf_max
-            active_ltf_threshold = strategy.bot_a_ltf_chop_min
-        else:
-            active_max_concurrent = strategy.bot_b_max_concurrent_trades
-            active_risk = strategy.bot_b_risk_per_trade
-            active_hurst_threshold = strategy.bot_b_hurst_max
-            active_htf_threshold = 45.0  # Unused practically by bot B
-            active_ltf_threshold = strategy.bot_b_chop_min
-
-        # Ranking Metric
-        if strategy_type == 0:
-            # Volatility-Adjusted Momentum Ranking (Bot A)
-            lookback = 24
-            momentum = matrix_close.diff(lookback)
-            volatility_adjusted_momentum = momentum / matrix_atr
-            matrix_rank = volatility_adjusted_momentum.fillna(0).replace([np.inf, -np.inf], 0)
-        else:
-            # Rubber Band Effect (Bot B) - Distance from 20-SMA
-            # We want to quantify the overextension to find extreme mean-reversion setups
-            sma20 = matrix_close.rolling(window=20).mean()
-            matrix_rank = ((matrix_close - sma20) / sma20).fillna(0).replace([np.inf, -np.inf], 0)
+        matrix_rsi = pd.DataFrame(rsi_dict).reindex(matrix_close.index).ffill().fillna(50.0)
+        
+        matrix_bb_u = pd.DataFrame(bb_upper_dict).reindex(matrix_close.index).ffill().fillna(0.0)
+        matrix_bb_l = pd.DataFrame(bb_lower_dict).reindex(matrix_close.index).ffill().fillna(0.0)
+        matrix_kc_u = pd.DataFrame(kc_upper_dict).reindex(matrix_close.index).ffill().fillna(0.0)
+        matrix_kc_l = pd.DataFrame(kc_lower_dict).reindex(matrix_close.index).ffill().fillna(0.0)
+        matrix_atr_ma = pd.DataFrame(atr_ma_dict).reindex(matrix_close.index).ffill().fillna(0.0)
 
         matrix_hurst_df = pd.DataFrame(hurst_dict).reindex(matrix_close.index).ffill().fillna(strategy.hurst_threshold)
         matrix_hurst = matrix_hurst_df.values
 
-        # 3. Call the Engine EXACTLY ONCE with the full StrategyConfig
-        freq_str = tf.replace("m", "min")
-        res = run_backtest(
-            close=matrix_close,
-            high=matrix_high,
-            low=matrix_low,
-            atr=matrix_atr,
-            phase_array=matrix_phase.values,
-            hurst_value=matrix_hurst,
-            ltf_metric=matrix_ltf.values,
-            htf_metric=matrix_htf.values,
-            volatility_zscore=matrix_vol_z.values,
-            htf_direction=matrix_htf_dir.values,
-            rank_metric=matrix_rank.values,
-            macro_filter_type=strategy.macro_filter_type,
-            htf_threshold=active_htf_threshold,
-            ltf_threshold=active_ltf_threshold,
-            veto_threshold=strategy.veto_threshold,
-            hurst_threshold=active_hurst_threshold,
-            trailing_multiplier=strategy.trailing_atr_multiplier,
-            breakeven_threshold=strategy.breakeven_atr_threshold,
-            max_concurrent_trades=active_max_concurrent,
-            risk_per_trade=active_risk,
-            initial_capital=strategy.backtest_initial_capital,
-            commission=strategy.backtest_commission,
-            freq=freq_str,
-            strategy_type=strategy_type,
-            bot_b_hurst_max=strategy.bot_b_hurst_max,
-            bot_b_chop_min=strategy.bot_b_chop_min,
-            bot_b_take_profit_atr=strategy.bot_b_take_profit_atr,
-            bot_b_stop_loss_atr=strategy.bot_b_stop_loss_atr,
-            bot_b_max_holding_bars=strategy.bot_b_max_holding_bars
-        )
+        active_bots = []
+        if tf in strategy.bot_a_timeframes: active_bots.append(0)
+        if tf in strategy.bot_b_timeframes: active_bots.append(1)
+        if tf in strategy.bot_c_timeframes: active_bots.append(2)
+        if tf in strategy.bot_d_timeframes: active_bots.append(3)
 
-        if res:
-            res["timeframe"] = tf
-            res["symbol"] = "PORTFOLIO"
-            res["best_hurst_threshold"] = strategy.hurst_threshold
-            results.append(res)
+        for strategy_type in active_bots:
+            bot_names = {0: 'A (Trend)', 1: 'B (Mean Reversion)', 2: 'C (Squeeze)', 3: 'D (ATR-RSI)'}
+            logger.info(f"Using Strategy Bot {bot_names[strategy_type]}")
 
-            # Export trade log for this timeframe
-            output_dir = Path(strategy.backtest_output_dir)
-            output_dir.mkdir(parents=True, exist_ok=True)
-            csv_path = output_dir / f"trades_PORTFOLIO_{tf}.csv"
-            export_trade_log_csv(res["portfolio"], str(csv_path), symbol="PORTFOLIO")
-        else:
-            reason = "backtest engine returned no result"
-            skipped_timeframes.append((tf, reason))
-            logger.warning(f"Skipping timeframe {tf}: {reason}")
+            if strategy_type == 0:
+                active_max_concurrent = strategy.bot_a_max_concurrent_trades
+                active_risk = strategy.bot_a_risk_per_trade
+                active_hurst_threshold = strategy.bot_a_hurst_min
+                active_htf_threshold = strategy.bot_a_chop_htf_max
+                active_ltf_threshold = strategy.bot_a_ltf_chop_min
+                # Volatility-Adjusted Momentum Ranking (Bot A)
+                lookback = 24
+                momentum = matrix_close.diff(lookback)
+                volatility_adjusted_momentum = momentum / matrix_atr
+                matrix_rank = volatility_adjusted_momentum.fillna(0).replace([np.inf, -np.inf], 0)
+            elif strategy_type == 1:
+                active_max_concurrent = strategy.bot_b_max_concurrent_trades
+                active_risk = strategy.bot_b_risk_per_trade
+                active_hurst_threshold = strategy.bot_b_hurst_max
+                active_htf_threshold = 45.0  # Unused practically by bot B
+                active_ltf_threshold = strategy.bot_b_chop_min
+                # Extreme Oscillator Deviation (Bot B) - Use RSI as the rank metric
+                matrix_rank = matrix_rsi.replace([np.inf, -np.inf], 50.0)
+            elif strategy_type == 2:
+                active_max_concurrent = strategy.bot_c_max_concurrent_trades
+                active_risk = strategy.bot_c_risk_per_trade
+                active_hurst_threshold = strategy.hurst_threshold
+                active_htf_threshold = 45.0
+                active_ltf_threshold = 50.0
+                matrix_rank = matrix_rsi.replace([np.inf, -np.inf], 50.0)
+            elif strategy_type == 3:
+                active_max_concurrent = strategy.bot_d_max_concurrent_trades
+                active_risk = strategy.bot_d_risk_per_trade
+                active_hurst_threshold = strategy.hurst_threshold
+                active_htf_threshold = 45.0
+                active_ltf_threshold = 50.0
+                matrix_rank = matrix_rsi.replace([np.inf, -np.inf], 50.0)
+
+            # 3. Call the Engine EXACTLY ONCE with the full StrategyConfig
+            freq_str = tf.replace("m", "min")
+            res = run_backtest(
+                close=matrix_close,
+                high=matrix_high,
+                low=matrix_low,
+                atr=matrix_atr,
+                phase_array=matrix_phase.values,
+                hurst_value=matrix_hurst,
+                ltf_metric=matrix_ltf.values,
+                htf_metric=matrix_htf.values,
+                volatility_zscore=matrix_vol_z.values,
+                htf_direction=matrix_htf_dir.values,
+                rank_metric=matrix_rank.values,
+                bb_upper=matrix_bb_u.values,
+                bb_lower=matrix_bb_l.values,
+                kc_upper=matrix_kc_u.values,
+                kc_lower=matrix_kc_l.values,
+                atr_ma=matrix_atr_ma.values,
+                macro_filter_type=strategy.macro_filter_type,
+                htf_threshold=active_htf_threshold,
+                ltf_threshold=active_ltf_threshold,
+                veto_threshold=strategy.veto_threshold,
+                hurst_threshold=active_hurst_threshold,
+                trailing_multiplier=strategy.trailing_atr_multiplier,
+                breakeven_threshold=strategy.breakeven_atr_threshold,
+                max_concurrent_trades=active_max_concurrent,
+                risk_per_trade=active_risk,
+                initial_capital=strategy.backtest_initial_capital,
+                commission=strategy.backtest_commission,
+                freq=freq_str,
+                strategy_type=strategy_type,
+                bot_b_hurst_max=strategy.bot_b_hurst_max,
+                bot_b_chop_min=strategy.bot_b_chop_min,
+                bot_b_take_profit_atr=strategy.bot_b_take_profit_atr,
+                bot_b_stop_loss_atr=strategy.bot_b_stop_loss_atr,
+                bot_b_max_holding_bars=strategy.bot_b_max_holding_bars,
+                bot_b_rsi_oversold=strategy.bot_b_rsi_oversold,
+                bot_b_rsi_overbought=strategy.bot_b_rsi_overbought,
+                bot_c_take_profit_atr=strategy.bot_c_take_profit_atr,
+                bot_c_stop_loss_atr=strategy.bot_c_stop_loss_atr,
+                bot_c_max_holding_bars=strategy.bot_c_max_holding_bars,
+                bot_c_rsi_oversold=strategy.bot_c_rsi_oversold,
+                bot_d_take_profit_atr=strategy.bot_d_take_profit_atr,
+                bot_d_stop_loss_atr=strategy.bot_d_stop_loss_atr,
+                bot_d_max_holding_bars=strategy.bot_d_max_holding_bars,
+                bot_d_rsi_oversold=strategy.bot_d_rsi_oversold,
+            )
+
+            if res:
+                bot_letter = 'A' if strategy_type==0 else 'B' if strategy_type==1 else 'C' if strategy_type==2 else 'D'
+                res["timeframe"] = tf
+                res["symbol"] = f"PORTFOLIO_BOT_{bot_letter}"
+                res["best_hurst_threshold"] = strategy.hurst_threshold
+                results.append(res)
+
+                # Export trade log for this timeframe
+                output_dir = Path(strategy.backtest_output_dir)
+                output_dir.mkdir(parents=True, exist_ok=True)
+                csv_path = output_dir / f"trades_PORTFOLIO_{tf}_BOT_{bot_letter}.csv"
+                export_trade_log_csv(res["portfolio"], str(csv_path), symbol=f"PORTFOLIO_BOT_{bot_letter}")
+            else:
+                reason = "backtest engine returned no result"
+                skipped_timeframes.append((tf, reason))
+                logger.warning(f"Skipping timeframe {tf}: {reason}")
 
     conn.close()
 
